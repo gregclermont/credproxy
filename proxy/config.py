@@ -12,7 +12,12 @@ Schema:
         headers:
           Authorization:
             placeholder: "credproxy_github_test"   # what workspace sends
-            real: "github_pat_..."                  # what proxy substitutes
+            real: "${secret:GITHUB_PAT}"            # resolved from stdin
+
+`real:` may be a literal string or contain `${secret:NAME}` references
+that are resolved at startup against secrets passed on stdin (see
+main._load_secrets). Missing references fail loudly. Secrets never
+touch disk or the process environment.
 
 The proxy publishes the placeholder via the /tokens bootstrap endpoint;
 the workspace uses it like a real token. On intercepted flows, the
@@ -22,6 +27,7 @@ forwarding upstream.
 A host listed under `hosts:` is intercepted (TLS terminated). `headers:`
 may be omitted or empty — intercept and log, no substitution.
 """
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -29,6 +35,7 @@ from typing import Protocol
 import yaml
 
 CONFIG_PATH = Path("/opt/proxy/config.yaml")
+SECRET_REF = re.compile(r"\$\{secret:([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 @dataclass(frozen=True)
@@ -65,7 +72,19 @@ def _fail(msg: str) -> None:
     raise SystemExit(f"[config] {msg}")
 
 
-def load(path: Path = CONFIG_PATH) -> YamlCredentials:
+def _resolve_secrets(value: str, secrets: dict[str, str], where: str) -> str:
+    def sub(m: re.Match[str]) -> str:
+        name = m.group(1)
+        if name not in secrets:
+            _fail(
+                f"{where} references ${{secret:{name}}} but {name} was not "
+                f"provided on stdin"
+            )
+        return secrets[name]
+    return SECRET_REF.sub(sub, value)
+
+
+def load(secrets: dict[str, str], path: Path = CONFIG_PATH) -> YamlCredentials:
     if not path.exists():
         _fail(f"missing config file: {path}")
     try:
@@ -107,6 +126,9 @@ def load(path: Path = CONFIG_PATH) -> YamlCredentials:
                     f"{path}: hosts.{host}.headers.{header}.real "
                     f"must be a non-empty string"
                 )
+            real = _resolve_secrets(
+                real, secrets, f"{path}: hosts.{host}.headers.{header}.real"
+            )
             subs.append(Substitution(header=header, placeholder=placeholder, real=real))
         hosts[host] = subs
     return YamlCredentials(hosts)
