@@ -66,9 +66,15 @@ Bootstrap (do this once, as root):
     curl -sSL http://proxy.local/bootstrap.sh | sh
 
 That installs the proxy CA system-wide and writes env vars to
-/etc/profile.d/credproxy.sh. After that, HTTPS to configured hosts is
-intercepted; everything else is byte-passthrough. The proxy may inject
-credential headers on intercepted hosts; you will not see the secrets.
+/etc/profile.d/credproxy.sh. HTTPS to configured hosts is intercepted;
+everything else is byte-passthrough.
+
+For intercepted hosts, the proxy publishes placeholder tokens via
+/tokens. Use those placeholders as you would real credentials (in env
+vars, tool config files, request headers); the proxy substitutes them
+for real secrets on the way upstream. You will not see the real values.
+A request to an intercepted host with no placeholder is forwarded as-is
+and logged.
 
 If proxy.local does not resolve, use 169.254.1.1 directly.
 
@@ -79,6 +85,7 @@ Endpoints (all GET):
   /env.sh        env-var exports only (for `eval` use)
   /setup         JSON: ca_url, env, version
   /domains       JSON: configured intercept hosts
+  /tokens        JSON: {host: {header: placeholder}} per-host placeholders
   /llms.txt      this file
 """
 
@@ -124,7 +131,12 @@ async def setup(_: web.Request) -> web.Response:
 
 async def domains(request: web.Request) -> web.Response:
     creds = request.app[CREDS_KEY]
-    return _no_store(web.json_response({"inject": sorted(creds.intercept_hosts())}))
+    return _no_store(web.json_response({"intercept": sorted(creds.intercept_hosts())}))
+
+
+async def tokens(request: web.Request) -> web.Response:
+    creds = request.app[CREDS_KEY]
+    return _no_store(web.json_response(creds.workspace_tokens()))
 
 
 async def llms_txt(_: web.Request) -> web.Response:
@@ -142,5 +154,6 @@ def make_app(creds: Credentials) -> web.Application:
     app.router.add_get("/env.sh", env_sh)
     app.router.add_get("/setup", setup)
     app.router.add_get("/domains", domains)
+    app.router.add_get("/tokens", tokens)
     app.router.add_get("/llms.txt", llms_txt)
     return app

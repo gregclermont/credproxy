@@ -1,4 +1,4 @@
-"""Proxy configuration: intercept set + per-host header injection.
+"""Proxy configuration: intercept set + per-host placeholder substitution.
 
 The on-disk format is a single YAML file (CONFIG_PATH). Callers go
 through the Credentials interface, never the file directly — so a future
@@ -9,13 +9,20 @@ Schema:
 
     hosts:
       api.github.com:
-        inject:
-          Authorization: "Bearer ghp_..."
-          X-Custom: "value"
+        headers:
+          Authorization:
+            placeholder: "credproxy_github_test"   # what workspace sends
+            real: "github_pat_..."                  # what proxy substitutes
 
-A host listed under `hosts:` is intercepted (TLS terminated). Empty
-`inject:` is allowed — intercept and log, no header injection.
+The proxy publishes the placeholder via the /tokens bootstrap endpoint;
+the workspace uses it like a real token. On intercepted flows, the
+proxy substring-replaces placeholder -> real in the named header before
+forwarding upstream.
+
+A host listed under `hosts:` is intercepted (TLS terminated). `headers:`
+may be omitted or empty — intercept and log, no substitution.
 """
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -24,51 +31,82 @@ import yaml
 CONFIG_PATH = Path("/opt/proxy/config.yaml")
 
 
+@dataclass(frozen=True)
+class Substitution:
+    header: str
+    placeholder: str
+    real: str
+
+
 class Credentials(Protocol):
     def intercept_hosts(self) -> set[str]: ...
-    def headers_for(self, host: str) -> dict[str, str]: ...
+    def substitutions_for(self, host: str) -> list[Substitution]: ...
+    def workspace_tokens(self) -> dict[str, dict[str, str]]: ...
 
 
 class YamlCredentials:
-    def __init__(self, hosts: dict[str, dict[str, str]]):
+    def __init__(self, hosts: dict[str, list[Substitution]]):
         self._hosts = hosts
 
     def intercept_hosts(self) -> set[str]:
         return set(self._hosts)
 
-    def headers_for(self, host: str) -> dict[str, str]:
-        return dict(self._hosts.get(host, {}))
+    def substitutions_for(self, host: str) -> list[Substitution]:
+        return list(self._hosts.get(host, []))
+
+    def workspace_tokens(self) -> dict[str, dict[str, str]]:
+        return {
+            host: {sub.header: sub.placeholder for sub in subs}
+            for host, subs in self._hosts.items()
+        }
+
+
+def _fail(msg: str) -> None:
+    raise SystemExit(f"[config] {msg}")
 
 
 def load(path: Path = CONFIG_PATH) -> YamlCredentials:
     if not path.exists():
-        raise SystemExit(f"[config] missing config file: {path}")
+        _fail(f"missing config file: {path}")
     try:
         raw = yaml.safe_load(path.read_text()) or {}
     except yaml.YAMLError as e:
-        raise SystemExit(f"[config] malformed YAML in {path}: {e}")
+        _fail(f"malformed YAML in {path}: {e}")
 
     if not isinstance(raw, dict) or "hosts" not in raw:
-        raise SystemExit(f"[config] {path}: missing top-level `hosts:` key")
+        _fail(f"{path}: missing top-level `hosts:` key")
     hosts_raw = raw["hosts"] or {}
     if not isinstance(hosts_raw, dict):
-        raise SystemExit(f"[config] {path}: `hosts:` must be a mapping")
+        _fail(f"{path}: `hosts:` must be a mapping")
 
-    hosts: dict[str, dict[str, str]] = {}
+    hosts: dict[str, list[Substitution]] = {}
     for host, entry in hosts_raw.items():
         entry = entry or {}
         if not isinstance(entry, dict):
-            raise SystemExit(f"[config] {path}: hosts.{host} must be a mapping")
-        inject = entry.get("inject") or {}
-        if not isinstance(inject, dict):
-            raise SystemExit(
-                f"[config] {path}: hosts.{host}.inject must be a mapping"
-            )
-        for header, value in inject.items():
-            if not isinstance(value, str):
-                raise SystemExit(
-                    f"[config] {path}: hosts.{host}.inject.{header} "
-                    f"must be a string, got {type(value).__name__}"
+            _fail(f"{path}: hosts.{host} must be a mapping")
+        headers = entry.get("headers") or {}
+        if not isinstance(headers, dict):
+            _fail(f"{path}: hosts.{host}.headers must be a mapping")
+
+        subs: list[Substitution] = []
+        for header, hentry in headers.items():
+            if not isinstance(hentry, dict):
+                _fail(
+                    f"{path}: hosts.{host}.headers.{header} must be a mapping "
+                    f"with `placeholder` and `real`"
                 )
-        hosts[host] = dict(inject)
+            placeholder = hentry.get("placeholder")
+            real = hentry.get("real")
+            if not isinstance(placeholder, str) or not placeholder:
+                _fail(
+                    f"{path}: hosts.{host}.headers.{header}.placeholder "
+                    f"must be a non-empty string"
+                )
+            if not isinstance(real, str) or not real:
+                _fail(
+                    f"{path}: hosts.{host}.headers.{header}.real "
+                    f"must be a non-empty string"
+                )
+            subs.append(Substitution(header=header, placeholder=placeholder, real=real))
+        hosts[host] = subs
     return YamlCredentials(hosts)

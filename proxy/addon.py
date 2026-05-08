@@ -1,9 +1,14 @@
-"""Proxy mitmproxy addon: terminate configured hosts, inject headers.
+"""Proxy mitmproxy addon: terminate configured hosts, substitute placeholders.
 
 For SNIs in `creds.intercept_hosts()`, mitmproxy terminates TLS using its
-CA; the `request` hook then injects any configured headers and the flow
-continues to the upstream. For everything else, `ignore_connection =
-True` puts the flow into byte-passthrough so we only see the SNI.
+CA; the `request` hook scans configured headers and substring-replaces
+the configured placeholder with the real credential before forwarding.
+For everything else, `ignore_connection = True` puts the flow into
+byte-passthrough so we only see the SNI.
+
+The substitution is intentionally string-level: the user's placeholder
+can be a bare token, scheme-prefixed, or any other shape they want, and
+the real value follows the same convention.
 
 The sentinel-IP path is handled by bootstrap.py on a separate listener
 (:39998), so this addon never sees those flows.
@@ -28,9 +33,18 @@ class HostnameLogger:
     def request(self, flow: http.HTTPFlow) -> None:
         req = flow.request
         host = req.pretty_host
-        injected = []
-        for header, value in self._creds.headers_for(host).items():
-            req.headers[header] = value
-            injected.append(header)
-        marker = f" (+{','.join(injected)})" if injected else ""
+        substituted: list[str] = []
+        for sub in self._creds.substitutions_for(host):
+            value = req.headers.get(sub.header)
+            if value is None or sub.placeholder not in value:
+                continue
+            req.headers[sub.header] = value.replace(sub.placeholder, sub.real)
+            substituted.append(sub.header)
+
+        if substituted:
+            marker = f" (sub:{','.join(substituted)})"
+        elif host in self._creds.intercept_hosts():
+            marker = " (no-sub)"
+        else:
+            marker = ""
         print(f"[http] {req.method} {host}{req.path}{marker}", flush=True)
