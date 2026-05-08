@@ -9,7 +9,7 @@ SHELL := /bin/bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build up down restart logs reload shell workspace rebuild
+.PHONY: help build up down restart logs reload shell workspace rebuild test
 
 help:
 	@echo "credproxy dev harness"
@@ -25,6 +25,7 @@ help:
 	@echo "  make shell      open a shell in the proxy (root)"
 	@echo "  make workspace  run a workspace container joined to the proxy netns"
 	@echo "  make rebuild    down + build + up -- expects secrets on stdin"
+	@echo "  make test       run pytest in the proxy image"
 
 build:
 	docker build -t $(PROXY_IMAGE) proxy/
@@ -65,3 +66,12 @@ workspace:
 		$(WORKSPACE_IMAGE) bash
 
 rebuild: down build up
+
+test:
+	docker run --rm \
+		-v $(CURDIR)/proxy:/opt/proxy \
+		-v $(CURDIR)/tests:/opt/tests \
+		-w /opt \
+		--entrypoint python \
+		$(PROXY_IMAGE) \
+		-m pytest -v tests/
