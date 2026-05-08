@@ -9,49 +9,45 @@ SHELL := /bin/bash
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build up down restart logs reload shell workspace rebuild test add-secret set-config
+.PHONY: help build up down restart logs reload shell workspace rebuild test set-config
 
 help:
 	@echo "credproxy dev harness"
 	@echo ""
-	@echo "  make build      build the proxy image"
-	@echo "  make up         start the proxy; reads JSON secrets from stdin"
-	@echo "                  e.g. echo '{\"GITHUB_PAT\":\"ghp_...\"}' | make up"
-	@echo "                  no secrets needed: make up </dev/null"
-	@echo "  make down       stop and remove the proxy container"
-	@echo "  make restart    down + up (no rebuild) -- expects secrets on stdin"
-	@echo "  make logs       tail proxy logs"
-	@echo "  make reload     hot-reload python code (secrets cached in supervisor)"
-	@echo "  make shell      open a shell in the proxy (root)"
-	@echo "  make workspace  run a workspace container joined to the proxy netns"
-	@echo "  make rebuild    down + build + up -- expects secrets on stdin"
-	@echo "  make test       run pytest in the proxy image"
-	@echo "  make add-secret NAME=X  add/update secret X (value on stdin); reloads"
-	@echo "                  e.g. op read 'op://...' | make add-secret NAME=GITHUB_PAT"
-	@echo "  make set-config push proxy/config.yaml via admin API after resolving"
-	@echo "                  \$${secret:NAME} refs from host env. Reloads proxy."
-	@echo "                  e.g. GITHUB_PAT=\$$(op read 'op://...') make set-config"
+	@echo "  make build       build the proxy image"
+	@echo "  make up          start the proxy with an empty config; admin"
+	@echo "                   token is generated and saved to .run/auth.token"
+	@echo "  make down        stop and remove the proxy container"
+	@echo "  make restart     down + up (no rebuild)"
+	@echo "  make logs        tail proxy logs"
+	@echo "  make reload      hot-reload python (re-reads /run/secrets/config.json)"
+	@echo "  make shell       open a shell in the proxy (root)"
+	@echo "  make workspace   run a workspace container joined to the proxy netns"
+	@echo "  make rebuild     down + build + up"
+	@echo "  make test        run pytest in the proxy image"
+	@echo "  make set-config  resolve proxy/config.yaml \$${secret:NAME} refs"
+	@echo "                   from host env and POST via /admin/config."
+	@echo "                   e.g. GITHUB_PAT=\$$(op read 'op://...') make set-config"
 
 build:
 	docker build -t $(PROXY_IMAGE) proxy/
 
 up:
-	@# `docker run -d` closes stdin, defeating the secrets pipeline.
-	@# Instead we run in the foreground and background it. POSIX shells
-	@# default backgrounded jobs' stdin to /dev/null, so we explicitly
-	@# redirect </dev/stdin to keep the pipe attached -- that's how EOF
-	@# from the source `<json> | make up` reaches the supervisor's cat.
+	@# Generate an auth token, save host-side at .run/auth.token (0600),
+	@# and pipe a {"auth_token": "..."} envelope into the container's
+	@# stdin. TOKEN is passed to python via env (not argv) so it doesn't
+	@# show in ps. The supervisor reads this once and persists it on
+	@# tmpfs so reloads keep the same token.
 	@#
-	@# Stdin shape: {"auth_token": "...", "secrets": {...}}.
-	@# We generate a fresh bearer token here, persist a copy to
-	@# .run/auth.token (0600) for the host CLI to reuse, and wrap the
-	@# user's secrets JSON. TOKEN is passed to python via env (not argv)
-	@# so it doesn't show in ps. The wrapper python tolerates empty stdin.
+	@# Why not `docker run -d`? It closes stdin, defeating the pipeline.
+	@# We run in foreground + background. POSIX shells default
+	@# backgrounded jobs' stdin to /dev/null, so we redirect </dev/stdin
+	@# explicitly to keep the pipe attached.
 	@mkdir -p .run
 	@TOKEN=$$(openssl rand -hex 16); \
 	echo -n "$$TOKEN" > .run/auth.token; \
 	chmod 600 .run/auth.token; \
-	TOKEN="$$TOKEN" python3 -c 'import json,os,sys; raw=sys.stdin.read().strip(); secrets=json.loads(raw) if raw else {}; print(json.dumps({"auth_token":os.environ["TOKEN"],"secrets":secrets}))' \
+	TOKEN="$$TOKEN" python3 -c 'import json,os; print(json.dumps({"auth_token":os.environ["TOKEN"]}))' \
 		| docker run -i --rm \
 			--name $(PROXY_NAME) \
 			--cap-add NET_ADMIN \
@@ -93,18 +89,6 @@ test:
 		--entrypoint python \
 		$(PROXY_IMAGE) \
 		-m pytest -v tests/
-
-add-secret:
-	@[ -n "$(NAME)" ] || { echo 'usage: NAME=X make add-secret  (value on stdin)'; exit 1; }
-	@[ -f .run/auth.token ] || { echo "$(PROXY_NAME): .run/auth.token missing; is the proxy up?"; exit 1; }
-	@TOKEN=$$(cat .run/auth.token); \
-	NAME="$(NAME)" python3 -c 'import json,os,sys; print(json.dumps({"name": os.environ["NAME"], "value": sys.stdin.read()}))' \
-		| curl -sS --fail --show-error \
-			-H "Authorization: Bearer $$TOKEN" \
-			-H "Content-Type: application/json" \
-			--data-binary @- \
-			http://127.0.0.1:39997/admin/secrets \
-		&& echo
 
 set-config:
 	@./bin/credproxy push-config

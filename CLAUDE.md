@@ -12,12 +12,14 @@ When implementation continues, the v1 deliverables enumerated in `design.md` ("V
 
 The product is **two containers that must stay separated**:
 
-1. **Proxy container** (Linux, requires `NET_ADMIN`): owns the netns, installs iptables rules, runs mitmproxy on `127.0.0.1:39999`, plus a small aiohttp app on `127.0.0.1:39998` for the bootstrap API. iptables redirects sentinel-IP `:80` to the bootstrap listener and everything-else-TCP to mitmproxy.
-2. **Host CLI** (Python in v1, Go later): a thin orchestrator over `docker`/`podman`. Configures and launches the proxy; runs workspace containers with `--network=container:<proxy>` to share the netns.
+1. **Proxy container** (Linux, requires `NET_ADMIN`): owns the netns, installs iptables rules, runs three listeners — mitmproxy on `127.0.0.1:39999` (transparent intercept), aiohttp bootstrap API on `127.0.0.1:39998` (workspace-facing), aiohttp admin API on `0.0.0.0:39997` (host-facing, port-published to `127.0.0.1:39997` and isolated from the workspace via iptables INPUT-on-lo + OUTPUT-uid). iptables redirects sentinel-IP `:80` to the bootstrap listener and everything-else-TCP to mitmproxy.
+2. **Host CLI** (`bin/credproxy`, Python; Go later): orchestrator-like role. Today it has one subcommand, `push-config`, that reads a YAML config, resolves `${secret:NAME}` against host env vars, and POSTs the resolved JSON to `/admin/config`. The Makefile wraps this as `make set-config`.
 
 The workspace container is **the user's** image — never modified, never granted privilege. This "bring your own image" constraint is load-bearing for the whole design. See `docs/workspace.md` for the constraints joining the proxy's netns imposes.
 
-Traffic flow: workspace egress → iptables OUTPUT in shared netns → REDIRECT to mitmproxy (or to bootstrap for sentinel:80) → SNI peek → either inject-and-forward (terminate TLS) or passthrough (`client_hello.ignore_connection = True`).
+Traffic flow: workspace egress → iptables OUTPUT in shared netns → REDIRECT to mitmproxy (or to bootstrap for sentinel:80) → SNI peek → either substitute-placeholder-and-forward (terminate TLS) or passthrough (`client_hello.ignore_connection = True`).
+
+**Configuration flow**: `make up` starts the proxy with an empty config; the only stdin input is a generated bearer token. The user pushes the actual config via `make set-config` (which calls `bin/credproxy push-config`). The proxy stores the resolved config on tmpfs at `/run/secrets/config.json` and reads it on startup + each reload. No bind-mounted config file; secret resolution is the host CLI's responsibility.
 
 ## Architecture decisions that should not be casually reversed
 
@@ -38,21 +40,24 @@ These are spelled out in `design.md` ("Architecture decisions worth preserving")
 
 ## Key constants
 
-- `MITMPROXY_UID=31337` — mitmproxy runs as this uid; the iptables `-m owner --uid-owner` rule depends on it (prevents redirect loop on mitmproxy's own outbound).
+- `MITMPROXY_UID=31337` — mitmproxy runs as this uid; the iptables `-m owner --uid-owner` rules depend on it (prevents redirect loop on mitmproxy's own outbound, and gates the admin port).
 - `PROXY_PORT=39999` — mitmproxy transparent-intercept bind port. Picked unusual to minimize collision with workspace-side dev tools.
-- `BOOTSTRAP_PORT=39998` — aiohttp bootstrap-API bind port. Same "unusual" reasoning, adjacent to `PROXY_PORT` so the pair is easy to remember.
+- `BOOTSTRAP_PORT=39998` — aiohttp bootstrap-API bind port. Same "unusual" reasoning, adjacent to `PROXY_PORT`.
+- `ADMIN_PORT=39997` — aiohttp admin-API bind port, host-only via `-p 127.0.0.1:39997:39997` plus an `iptables INPUT -p tcp --dport 39997 -i lo -j DROP` rule that catches workspace-originated traffic (which routes via lo because the destination is a local-netns IP). The OUTPUT-uid rule is defense-in-depth.
 - `SENTINEL_IP=169.254.1.1` — link-local for the bootstrap endpoint, resolved as `proxy.local` from the workspace side. iptables redirects `<sentinel>:80` to the bootstrap listener.
 
 ## Commands
 
 - `make build` — build the proxy image.
-- `make up` / `make down` / `make restart` — lifecycle.
+- `make up` / `make down` / `make restart` — lifecycle. `make up` starts with an empty config; use `set-config` to populate.
+- `make set-config` — resolve `proxy/config.yaml` `${secret:NAME}` refs from host env and POST via `/admin/config`. e.g. `GITHUB_PAT=$(op read 'op://...') make set-config`.
 - `make logs` — tail proxy logs.
 - `make reload` — hot-reload python code in the running proxy (kills the python child; the bash supervisor respawns it).
 - `make shell` — root shell inside the proxy.
 - `make workspace` — run an interactive workspace container joined to the proxy netns.
 - `make rebuild` — `down + build + up`.
+- `make test` — run pytest in the proxy image.
 
 ## Open design questions
 
-`design.md` ends with an "Open questions" section (bootstrap env-var persistence, discovery URL convention, config reload mechanism, `/llms.txt` format, per-request vs. per-host injection, CA delivery via volume mount). These are unresolved — surface them rather than picking silently if your work touches one.
+`design.md` ends with an "Open questions" section (bootstrap env-var persistence, discovery URL convention, config reload mechanism, `/llms.txt` format, per-request vs. per-host injection, CA delivery via volume mount). Several are now answered by the admin API + host CLI direction; others are unresolved — surface them rather than picking silently if your work touches one.
