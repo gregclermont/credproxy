@@ -15,18 +15,39 @@ def secrets_file(tmp_path):
 
 
 @pytest.fixture
+def config_file(tmp_path):
+    """Path the /admin/config endpoint will write to."""
+    return tmp_path / "config.json"
+
+
+@pytest.fixture
 def reload_calls():
     """Sentinel list — appended to whenever the admin reload_fn is called."""
     return []
 
 
 @pytest.fixture
-def app(secrets_file, reload_calls):
+def app(secrets_file, config_file, reload_calls):
     return admin.make_admin_app(
         auth_token="secret-token-abc",
         secrets_path=secrets_file,
+        config_path=config_file,
         reload_fn=lambda: reload_calls.append(True),
     )
+
+
+VALID_CONFIG = {
+    "hosts": {
+        "api.github.com": {
+            "headers": {
+                "Authorization": {
+                    "placeholder": "credproxy_test",
+                    "real": "github_pat_real",
+                }
+            }
+        }
+    }
+}
 
 
 # ---- /admin/health: auth middleware ----
@@ -208,3 +229,102 @@ async def test_set_secret_non_object_body(aiohttp_client, app):
         json=[1, 2, 3],
     )
     assert resp.status == 400
+
+
+# ---- /admin/config ----
+
+async def test_set_config_writes_file_and_reloads(
+    aiohttp_client, app, config_file, reload_calls
+):
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer secret-token-abc"},
+        json=VALID_CONFIG,
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body == {"ok": True, "reloading": True}
+
+    on_disk = json.loads(config_file.read_text())
+    assert on_disk == VALID_CONFIG
+    assert reload_calls == [True]
+
+
+async def test_set_config_requires_auth(aiohttp_client, app, config_file, reload_calls):
+    client = await aiohttp_client(app)
+    resp = await client.post("/admin/config", json=VALID_CONFIG)
+    assert resp.status == 401
+    assert not config_file.exists()
+    assert reload_calls == []
+
+
+async def test_set_config_rejects_unresolved_secret_reference(
+    aiohttp_client, app, config_file, reload_calls
+):
+    """The endpoint refuses ${secret:NAME} -- caller must resolve client-side."""
+    bad = {
+        "hosts": {
+            "api.github.com": {
+                "headers": {
+                    "Authorization": {
+                        "placeholder": "ph",
+                        "real": "${secret:GITHUB_PAT}",
+                    }
+                }
+            }
+        }
+    }
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer secret-token-abc"},
+        json=bad,
+    )
+    assert resp.status == 400
+    body = await resp.json()
+    assert "GITHUB_PAT" in body["error"]
+    assert not config_file.exists()
+    assert reload_calls == []
+
+
+async def test_set_config_rejects_invalid_schema(
+    aiohttp_client, app, config_file, reload_calls
+):
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer secret-token-abc"},
+        json={"not-hosts": {}},
+    )
+    assert resp.status == 400
+    assert not config_file.exists()
+    assert reload_calls == []
+
+
+async def test_set_config_malformed_json(aiohttp_client, app, config_file):
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/admin/config",
+        headers={
+            "Authorization": "Bearer secret-token-abc",
+            "Content-Type": "application/json",
+        },
+        data=b"not json",
+    )
+    assert resp.status == 400
+    assert not config_file.exists()
+
+
+async def test_set_config_overwrites_existing_file(
+    aiohttp_client, app, config_file
+):
+    config_file.write_text(json.dumps({"hosts": {"old.example.com": {}}}))
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer secret-token-abc"},
+        json=VALID_CONFIG,
+    )
+    assert resp.status == 200
+    assert json.loads(config_file.read_text()) == VALID_CONFIG

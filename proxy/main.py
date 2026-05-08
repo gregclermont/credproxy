@@ -33,6 +33,7 @@ PROXY_PORT = 39999
 BOOTSTRAP_PORT = 39998
 ADMIN_PORT = 39997
 SECRETS_PATH = Path("/run/secrets/secrets.json")
+CONFIG_JSON_PATH = Path("/run/secrets/config.json")
 
 
 def _load_startup() -> tuple[str, dict[str, str]]:
@@ -82,7 +83,21 @@ async def run() -> None:
         flush=True,
     )
 
-    creds = config.load(secrets)
+    # Prefer the API-pushed config (already-resolved JSON) if present;
+    # otherwise fall back to the bind-mounted config.yaml + secrets
+    # resolution. The two paths coexist during the transition.
+    try:
+        if CONFIG_JSON_PATH.exists():
+            creds = config.load_resolved(
+                json.loads(CONFIG_JSON_PATH.read_text()),
+                source=str(CONFIG_JSON_PATH),
+            )
+            print(f"[main] config from {CONFIG_JSON_PATH}", flush=True)
+        else:
+            creds = config.load(secrets)
+            print(f"[main] config from {config.CONFIG_PATH}", flush=True)
+    except config.ConfigError as e:
+        sys.exit(str(e))
     print(
         f"[main] loaded config: {len(creds.intercept_hosts())} intercept "
         f"host(s): {sorted(creds.intercept_hosts())}",
@@ -109,7 +124,9 @@ async def run() -> None:
         loop.call_later(0.1, lambda: os.kill(os.getpid(), signal.SIGTERM))
 
     admin_runner = web.AppRunner(
-        admin.make_admin_app(auth_token, SECRETS_PATH, trigger_reload),
+        admin.make_admin_app(
+            auth_token, SECRETS_PATH, CONFIG_JSON_PATH, trigger_reload
+        ),
         access_log=None,
     )
     await admin_runner.setup()

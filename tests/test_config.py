@@ -15,31 +15,31 @@ def write_yaml(tmp_path: Path, content: str) -> Path:
 # ---- Failure paths (one test per _fail() branch) ----
 
 def test_missing_file(tmp_path):
-    with pytest.raises(SystemExit, match="missing config file"):
+    with pytest.raises(config.ConfigError, match="missing config file"):
         config.load({}, tmp_path / "absent.yaml")
 
 
 def test_malformed_yaml(tmp_path):
     p = write_yaml(tmp_path, "key: 'unterminated")
-    with pytest.raises(SystemExit, match="malformed YAML"):
+    with pytest.raises(config.ConfigError, match="malformed YAML"):
         config.load({}, p)
 
 
 def test_missing_top_level_hosts(tmp_path):
     p = write_yaml(tmp_path, "other: {}")
-    with pytest.raises(SystemExit, match="missing top-level"):
+    with pytest.raises(config.ConfigError, match="missing top-level"):
         config.load({}, p)
 
 
 def test_hosts_not_mapping(tmp_path):
     p = write_yaml(tmp_path, "hosts: [1, 2, 3]")
-    with pytest.raises(SystemExit, match="`hosts:` must be a mapping"):
+    with pytest.raises(config.ConfigError, match="`hosts:` must be a mapping"):
         config.load({}, p)
 
 
 def test_host_entry_not_mapping(tmp_path):
     p = write_yaml(tmp_path, "hosts:\n  api.github.com: 'wrong'")
-    with pytest.raises(SystemExit, match="hosts.api.github.com must be a mapping"):
+    with pytest.raises(config.ConfigError, match="hosts.api.github.com must be a mapping"):
         config.load({}, p)
 
 
@@ -49,7 +49,7 @@ hosts:
   api.github.com:
     headers: 'wrong'
 """)
-    with pytest.raises(SystemExit, match="headers must be a mapping"):
+    with pytest.raises(config.ConfigError, match="headers must be a mapping"):
         config.load({}, p)
 
 
@@ -60,7 +60,7 @@ hosts:
     headers:
       Authorization: 'wrong'
 """)
-    with pytest.raises(SystemExit, match="must be a mapping with"):
+    with pytest.raises(config.ConfigError, match="must be a mapping with"):
         config.load({}, p)
 
 
@@ -77,7 +77,7 @@ hosts:
       Authorization:
         {placeholder_yaml}
 """)
-    with pytest.raises(SystemExit, match="placeholder.*non-empty string"):
+    with pytest.raises(config.ConfigError, match="placeholder.*non-empty string"):
         config.load({}, p)
 
 
@@ -94,7 +94,7 @@ hosts:
       Authorization:
         {real_yaml}
 """)
-    with pytest.raises(SystemExit, match="real.*non-empty string"):
+    with pytest.raises(config.ConfigError, match="real.*non-empty string"):
         config.load({}, p)
 
 
@@ -107,7 +107,7 @@ hosts:
         placeholder: "ph"
         real: "${secret:UNDEFINED}"
 """)
-    with pytest.raises(SystemExit, match="UNDEFINED was not provided"):
+    with pytest.raises(config.ConfigError, match="UNDEFINED was not provided"):
         config.load({}, p)
 
 
@@ -207,3 +207,51 @@ hosts:
 """)
     creds = config.load({}, p)
     assert creds.substitutions_for("not-configured.com") == []
+
+
+# ---- load_resolved (parse-only path used by /admin/config) ----
+
+def test_load_resolved_minimal():
+    creds = config.load_resolved({
+        "hosts": {
+            "api.github.com": {
+                "headers": {
+                    "Authorization": {
+                        "placeholder": "ph",
+                        "real": "real_value",
+                    }
+                }
+            }
+        }
+    })
+    assert creds.intercept_hosts() == {"api.github.com"}
+    [sub] = creds.substitutions_for("api.github.com")
+    assert (sub.header, sub.placeholder, sub.real) == ("Authorization", "ph", "real_value")
+
+
+def test_load_resolved_rejects_unresolved_secret_reference():
+    """No secrets dict is provided, so any ${secret:NAME} fails the resolver."""
+    with pytest.raises(config.ConfigError, match="GITHUB_PAT was not provided"):
+        config.load_resolved({
+            "hosts": {
+                "api.github.com": {
+                    "headers": {
+                        "Authorization": {
+                            "placeholder": "ph",
+                            "real": "${secret:GITHUB_PAT}",
+                        }
+                    }
+                }
+            }
+        })
+
+
+def test_load_resolved_validation_errors_use_source_label():
+    """Default source label should appear in error messages, replacing path."""
+    with pytest.raises(config.ConfigError, match="<resolved>"):
+        config.load_resolved({"not-hosts": {}})
+
+
+def test_load_resolved_custom_source_label():
+    with pytest.raises(config.ConfigError, match="POST /admin/config"):
+        config.load_resolved({"not-hosts": {}}, source="POST /admin/config")
