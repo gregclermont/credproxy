@@ -1,50 +1,50 @@
-SIDECAR_NAME  := credproxy-sidecar
-SIDECAR_IMAGE := credproxy-sidecar:dev
-AGENT_IMAGE   := python:3.12-slim
+PROXY_NAME      := credproxy
+PROXY_IMAGE     := credproxy:dev
+WORKSPACE_IMAGE := python:3.12-slim
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build up down restart logs reload shell agent rebuild
+.PHONY: help build up down restart logs reload shell workspace rebuild
 
 help:
 	@echo "credproxy dev harness"
 	@echo ""
-	@echo "  make build     build the sidecar image"
-	@echo "  make up        start the sidecar (bind-mounts ./sidecar -> /opt/proxy)"
-	@echo "  make down      stop and remove the sidecar"
-	@echo "  make restart   down + up (no rebuild)"
-	@echo "  make logs      tail sidecar logs"
-	@echo "  make reload    hot-reload python code in the running sidecar"
-	@echo "  make shell     open a shell in the sidecar (root)"
-	@echo "  make agent     run an agent container joined to the sidecar netns"
-	@echo "  make rebuild   down + build + up"
+	@echo "  make build      build the proxy image"
+	@echo "  make up         start the proxy (bind-mounts ./proxy -> /opt/proxy)"
+	@echo "  make down       stop and remove the proxy container"
+	@echo "  make restart    down + up (no rebuild)"
+	@echo "  make logs       tail proxy logs"
+	@echo "  make reload     hot-reload python code in the running proxy"
+	@echo "  make shell      open a shell in the proxy (root)"
+	@echo "  make workspace  run a workspace container joined to the proxy netns"
+	@echo "  make rebuild    down + build + up"
 
 build:
-	docker build -t $(SIDECAR_IMAGE) sidecar/
+	docker build -t $(PROXY_IMAGE) proxy/
 
 up:
 	docker run -d --rm \
-		--name $(SIDECAR_NAME) \
+		--name $(PROXY_NAME) \
 		--cap-add NET_ADMIN \
-		-v $(CURDIR)/sidecar:/opt/proxy \
-		$(SIDECAR_IMAGE)
+		-v $(CURDIR)/proxy:/opt/proxy \
+		$(PROXY_IMAGE)
 
 down:
-	-docker rm -f $(SIDECAR_NAME) 2>/dev/null
+	-docker rm -f $(PROXY_NAME) 2>/dev/null
 
 restart: down up
 
 logs:
-	docker logs -f $(SIDECAR_NAME)
+	docker logs -f $(PROXY_NAME)
 
 reload:
-	docker exec $(SIDECAR_NAME) /opt/proxy/reload.sh
+	docker exec $(PROXY_NAME) /opt/proxy/reload.sh
 
 shell:
-	docker exec -it --user 0 $(SIDECAR_NAME) bash
+	docker exec -it --user 0 $(PROXY_NAME) bash
 
-agent:
-	docker run --rm -it --network=container:$(SIDECAR_NAME) \
-		$(AGENT_IMAGE) bash
+workspace:
+	docker run --rm -it --network=container:$(PROXY_NAME) \
+		$(WORKSPACE_IMAGE) bash
 
 rebuild: down build up

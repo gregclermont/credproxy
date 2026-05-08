@@ -1,0 +1,99 @@
+# Workspace
+
+The **workspace** is whatever container the user runs to do their work
+behind credproxy — an LLM agent, a CI runner, a dev shell, a batch job.
+It joins the **proxy** container's network namespace via
+`--network=container:credproxy`. The proxy owns the netns; the workspace
+shares it.
+
+The workspace image itself can be anything. No special build, no
+`NET_ADMIN`, no installed CA, no environment variables. The constraints
+below are about the workspace's *runtime configuration*, not its
+contents.
+
+## Docker run flags rejected by the daemon
+
+Joining a foreign network namespace makes the workspace's own network
+identity meaningless, so Docker rejects flags that try to set one:
+
+| Flag | Daemon error |
+|---|---|
+| `--hostname` | `conflicting options: hostname and the network mode` |
+| `--dns` | `conflicting options: dns and the network mode` |
+| `--add-host` | `conflicting options: custom host-to-IP mapping and the network mode` |
+| `--ip` (and `--ip6`) | `invalid config for network container:…` |
+| `-p` / `--publish` / `-P` | `conflicting options: port publishing and the container type network mode` |
+
+If you need any of these, set them on the **proxy**'s `docker run`
+instead — the workspace will inherit them.
+
+## Docker run flags accepted but ineffective
+
+These don't error at start, but the proxy's bind-mounted files (see
+below) make them no-ops or, worse, side-effects on the *proxy*:
+
+- `--mac-address` — silently ignored; workspace uses the proxy's MAC.
+- `--dns-search`, `--dns-option` — would need to write to
+  `/etc/resolv.conf`, which is shared with the proxy.
+
+Treat these as "don't bother."
+
+## Files inherited from the proxy
+
+`--network=container:` bind-mounts these from the proxy into the
+workspace. Same inode, both directions:
+
+- `/etc/hosts`
+- `/etc/resolv.conf`
+- `/etc/hostname`
+
+Implications:
+
+- Whatever the workspace image baked into these files at build time is
+  **completely shadowed** at runtime.
+- Edits the workspace makes (e.g., a startup script appending to
+  `/etc/hosts`) are visible from the proxy and persist as long as the
+  proxy lives.
+- The workspace's effective hostname is the proxy's container hostname.
+
+## Reserved in the shared netns
+
+| Resource | Purpose |
+|---|---|
+| TCP `*:39998` | Bootstrap HTTP API (aiohttp) |
+| TCP `*:39999` | mitmproxy transparent listener |
+| IP `169.254.1.1` | Sentinel; resolves as `proxy.local` |
+
+The workspace cannot bind 39998 or 39999 on `0.0.0.0` or `127.0.0.1`
+(the proxy already holds them). It can in principle bind on a
+non-loopback interface; in practice this never matters.
+
+## Egress shape
+
+What happens to packets the workspace originates:
+
+- **All TCP** is redirected via iptables. Either to the bootstrap
+  listener (for `169.254.1.1:80`) or to mitmproxy (everything else).
+- **`localhost` / `127.0.0.0/8`** is exempted; workspace-internal
+  services keep working unmodified.
+- **IPv6** is dropped wholesale (`ip6tables -P OUTPUT DROP`).
+- **UDP/443** is dropped to force HTTP/3 → HTTP/2 fallback.
+- **DNS (UDP/53)** is left alone; the system resolver works normally.
+- **ICMP** is left alone.
+
+## Lifecycle
+
+- **Proxy must start first.** You can't retroactively attach a running
+  container to the proxy's netns.
+- **Proxy going down kills the workspace's network.** The netns dies
+  with the proxy; sockets in the workspace close.
+- **Workspace can be restarted freely** while the proxy stays up. Each
+  fresh workspace re-inherits the proxy's `/etc/hosts` etc.
+
+## What the workspace does *not* need
+
+- No `NET_ADMIN`, no `CAP_NET_BIND_SERVICE`, no privileged mode.
+- No image modification, no preinstalled CA, no Dockerfile snippet.
+- No environment variables (`HTTP_PROXY` etc.) — capture is transparent
+  at the kernel level. Set them only if you specifically want CA trust;
+  see `http://proxy.local/env.sh`.
