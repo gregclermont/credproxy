@@ -10,6 +10,7 @@ from pathlib import Path
 from aiohttp import web
 
 from admin import STATE_KEY
+from config import Credentials
 
 CA_CERT_PATH = Path("/home/mitmuser/.mitmproxy/mitmproxy-ca-cert.pem")
 VERSION = "0.0.1"
@@ -90,6 +91,19 @@ Endpoints (all GET):
 """
 
 
+def workspace_tokens(creds: Credentials) -> dict[str, dict[str, str]]:
+    """JSON shape for /tokens: {host: {header: placeholder}}.
+
+    Derived from the Credentials Protocol's two lookup primitives;
+    lives here because the shape is a bootstrap-API contract, not a
+    credential-lookup concern.
+    """
+    return {
+        host: {sub.header: sub.placeholder for sub in creds.substitutions_for(host)}
+        for host in creds.intercept_hosts()
+    }
+
+
 async def health(_: web.Request) -> web.Response:
     return web.json_response({"ok": True, "version": VERSION})
 
@@ -123,7 +137,7 @@ async def domains(request: web.Request) -> web.Response:
 
 async def tokens(request: web.Request) -> web.Response:
     state = request.app[STATE_KEY]
-    return web.json_response(state.creds.workspace_tokens())
+    return web.json_response(workspace_tokens(state.creds))
 
 
 async def llms_txt(_: web.Request) -> web.Response:

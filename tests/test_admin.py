@@ -324,6 +324,25 @@ async def test_tokens_reflects_state(aiohttp_client, app, state):
     assert await resp.json() == {"api.github.com": {"Authorization": "ph"}}
 
 
+def test_workspace_tokens_function():
+    """Unit test for the bootstrap.workspace_tokens free function."""
+    creds = YamlCredentials({
+        "api.github.com": [
+            Substitution("Authorization", "ph1", "r1"),
+            Substitution("X-Custom", "ph2", "r2"),
+        ],
+        "api.example.com": [Substitution("X-API-Key", "ph3", "r3")],
+    })
+    assert bootstrap.workspace_tokens(creds) == {
+        "api.github.com": {"Authorization": "ph1", "X-Custom": "ph2"},
+        "api.example.com": {"X-API-Key": "ph3"},
+    }
+
+
+def test_workspace_tokens_empty():
+    assert bootstrap.workspace_tokens(YamlCredentials({})) == {}
+
+
 async def test_no_store_header_present(aiohttp_client, app):
     client = await aiohttp_client(app)
     resp = await client.get("/health")

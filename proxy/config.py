@@ -36,7 +36,6 @@ class Substitution:
 class Credentials(Protocol):
     def intercept_hosts(self) -> set[str]: ...
     def substitutions_for(self, host: str) -> list[Substitution]: ...
-    def workspace_tokens(self) -> dict[str, dict[str, str]]: ...
 
 
 class YamlCredentials:
@@ -48,12 +47,6 @@ class YamlCredentials:
 
     def substitutions_for(self, host: str) -> list[Substitution]:
         return list(self._hosts.get(host, []))
-
-    def workspace_tokens(self) -> dict[str, dict[str, str]]:
-        return {
-            host: {sub.header: sub.placeholder for sub in subs}
-            for host, subs in self._hosts.items()
-        }
 
 
 class ConfigError(Exception):

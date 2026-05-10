@@ -132,28 +132,6 @@ def test_intercept_only_no_headers():
     assert creds.substitutions_for("api.github.com") == []
 
 
-def test_workspace_tokens_shape():
-    creds = config.load_resolved({
-        "hosts": {
-            "api.github.com": {
-                "headers": {
-                    "Authorization": {"placeholder": "ph1", "real": "r1"},
-                    "X-Custom": {"placeholder": "ph2", "real": "r2"},
-                }
-            },
-            "api.example.com": {
-                "headers": {
-                    "X-API-Key": {"placeholder": "ph3", "real": "r3"},
-                }
-            },
-        }
-    })
-    assert creds.workspace_tokens() == {
-        "api.github.com": {"Authorization": "ph1", "X-Custom": "ph2"},
-        "api.example.com": {"X-API-Key": "ph3"},
-    }
-
-
 def test_substitutions_for_unknown_host_returns_empty():
     creds = config.load_resolved({
         "hosts": {
@@ -172,5 +150,4 @@ def test_empty_credentials_no_intercepts():
     config has been pushed yet."""
     creds = config.YamlCredentials({})
     assert creds.intercept_hosts() == set()
-    assert creds.workspace_tokens() == {}
     assert creds.substitutions_for("anything.example") == []
