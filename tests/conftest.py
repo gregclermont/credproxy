@@ -1,4 +1,4 @@
-# tests/ run via `make test` against the proxy image, with the proxy
+# tests/ run via `credproxy test` against the proxy image, with the proxy
 # directory bind-mounted at /opt/proxy. Make those modules importable.
 import sys
 

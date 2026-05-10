@@ -49,7 +49,7 @@ fi
 echo "[entrypoint] dropping to uid $MITMPROXY_UID, exec python"
 # setpriv preserves env, so HOME would still point at /root. mitmproxy reads
 # ~/.mitmproxy as its confdir; force it to mitmuser's home. Python is PID 1
-# inside the netns; SIGHUP triggers an in-place re-exec for `make reload`.
+# inside the netns; SIGHUP triggers an in-place re-exec for `credproxy reload`.
 # PYTHONDONTWRITEBYTECODE keeps .pyc out of the bind-mounted /opt/proxy.
 exec env HOME=/home/mitmuser PYTHONDONTWRITEBYTECODE=1 setpriv \
     --reuid="$MITMPROXY_UID" \

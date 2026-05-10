@@ -1,9 +1,9 @@
 """Runtime constants -- parsed from constants.sh, the single source of truth.
 
-constants.sh is sourced by entrypoint.sh and `include`d by the root Makefile;
-this module parses it so Python sees the same values without manual sync.
-The shell file is restricted to plain `KEY=VALUE` lines (no `export`, no
-command substitution); this parser matches that contract.
+constants.sh is sourced by entrypoint.sh; this module parses it so Python
+sees the same values without manual sync. The shell file is restricted to
+plain `KEY=VALUE` lines (no `export`, no command substitution); this parser
+matches that contract.
 """
 from pathlib import Path
 

@@ -1,8 +1,19 @@
 FROM python:3.12-slim
 
-# Build arg matches MITMPROXY_UID in proxy/constants.sh; the Makefile
-# wires that value through via --build-arg.
+# Must match MITMPROXY_UID in proxy/constants.sh (drift would silently
+# break the iptables --uid-owner rule).
 ARG MITMPROXY_UID=31337
+
+# Image's published "API contract" with the host CLI: which port the
+# HTTP listener uses, and which paths the in-container code reads from
+# / writes to. The CLI reads these via `docker inspect` and uses them
+# to build `docker run --tmpfs / --mount / -p` flags. Values must
+# agree with proxy/constants.sh and the hardcoded paths in admin.py;
+# bumping any of them is a CLI/image API break.
+LABEL credproxy.port.http="39998"
+LABEL credproxy.mount.tmpfs="/run/secrets"
+LABEL credproxy.mount.token="/run/secrets-ro/auth.token"
+LABEL credproxy.mount.source="/opt/proxy"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         iptables \

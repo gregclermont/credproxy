@@ -2,7 +2,7 @@
 
 The proxy receives an already-resolved config (literal `real:` values,
 no template references) via POST /admin/config. The host CLI
-`bin/credproxy push-config` is the supported producer; it reads a YAML
+`bin/credproxy config` is the supported producer; it reads a YAML
 config and resolves `${secret:NAME}` references against host
 environment variables before posting.
 

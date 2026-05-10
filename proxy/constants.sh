@@ -1,9 +1,12 @@
-# Runtime constants -- single source of truth for shell + Makefile.
-# Mirrored in proxy/constants.py for python; keep in sync.
+# Image-internal runtime constants -- single source of truth for shell
+# + python inside the proxy container. Sourced by entrypoint.sh and
+# parsed by constants.py.
 #
-# Plain KEY=VALUE only (no `export`, no command substitution): this
-# file is sourced by entrypoint.sh AND `include`d by the root Makefile.
-# Both parsers agree on this minimal syntax.
+# Plain KEY=VALUE only (no `export`, no command substitution): the
+# python parser is intentionally minimal.
+#
+# These are NOT the values the host CLI consumes -- those are published
+# as Docker LABELs on the proxy image (see proxy/Dockerfile).
 
 MITMPROXY_UID=31337
 HTTP_PORT=39998

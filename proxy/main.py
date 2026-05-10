@@ -10,11 +10,11 @@ The auth token is bind-mounted at /run/secrets-ro/auth.token from the
 host; admin.py reads it fresh per request, so host-side rotation
 takes effect without a restart. Config lives on tmpfs at
 /run/secrets/config.json, written by POST /admin/config. On SIGHUP
-(triggered by `make reload`) python re-execs itself in place; the
-container, its netns/iptables, and tmpfs survive, so pushed config
-persists across reloads. A python crash takes the container down
-(no supervisor) -- full container restart drops the config and the
-host re-pushes via bin/credproxy push-config.
+(triggered by `credproxy reload`) python re-execs itself in place;
+the container, its netns/iptables, and tmpfs survive, so pushed
+config persists across reloads. A python crash takes the container
+down (no supervisor) -- full container restart drops the config and
+the host re-pushes via `credproxy config`.
 """
 import asyncio
 import os
