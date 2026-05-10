@@ -71,7 +71,7 @@ non-loopback interface; in practice this never matters.
 `/admin/*` routes on the HTTP API require a bearer token the workspace
 does not have; they return 401 to the workspace. Bootstrap routes
 (`/health`, `/ca.crt`, `/bootstrap.sh`, `/env.sh`, `/setup`,
-`/domains`, `/tokens`, `/llms.txt`) are open by design.
+`/llms.txt`) are open by design.
 
 ## Egress shape
 

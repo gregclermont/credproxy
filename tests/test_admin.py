@@ -298,30 +298,29 @@ async def test_health_route(aiohttp_client, app):
     assert body["ok"] is True
 
 
-async def test_setup_route(aiohttp_client, app):
+async def test_setup_static_fields(aiohttp_client, app):
+    """Static fields present even with an empty credentials state."""
     client = await aiohttp_client(app)
     resp = await client.get("/setup")
     assert resp.status == 200
     body = await resp.json()
     assert body["ca_url"] == "http://proxy.local/ca.crt"
+    assert body["version"] == bootstrap.VERSION
+    assert body["env"] == bootstrap.CA_ENV
+    assert body["intercept_hosts"] == []
+    assert body["tokens"] == {}
 
 
-async def test_domains_reflects_state(aiohttp_client, app, state):
-    state.creds = YamlCredentials({"api.github.com": []})
-    client = await aiohttp_client(app)
-    resp = await client.get("/domains")
-    assert resp.status == 200
-    assert await resp.json() == {"intercept": ["api.github.com"]}
-
-
-async def test_tokens_reflects_state(aiohttp_client, app, state):
+async def test_setup_reflects_state(aiohttp_client, app, state):
     state.creds = YamlCredentials(
         {"api.github.com": [Substitution("Authorization", "ph", "real")]}
     )
     client = await aiohttp_client(app)
-    resp = await client.get("/tokens")
+    resp = await client.get("/setup")
     assert resp.status == 200
-    assert await resp.json() == {"api.github.com": {"Authorization": "ph"}}
+    body = await resp.json()
+    assert body["intercept_hosts"] == ["api.github.com"]
+    assert body["tokens"] == {"api.github.com": {"Authorization": "ph"}}
 
 
 def test_workspace_tokens_function():
