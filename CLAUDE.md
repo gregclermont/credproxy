@@ -19,13 +19,13 @@ The workspace container is **the user's** image — never modified, never grante
 
 Traffic flow: workspace egress → iptables OUTPUT in shared netns → REDIRECT to mitmproxy (or to the HTTP API for sentinel:80) → SNI peek → either substitute-placeholder-and-forward (terminate TLS) or passthrough (`client_hello.ignore_connection = True`).
 
-**Configuration / TOFU flow**: `make up` starts the proxy with no token and no config — Trust On First Use. The host CLI's first `push-config` call sends a freshly-generated bearer token; the proxy persists that token to tmpfs at `/run/secrets/auth.token` and the config to `/run/secrets/config.json`, and recognizes the same bearer on subsequent calls. The cached token lives host-side at `.run/auth.token` (mode 0600). Python respawns inside the same container preserve state via tmpfs; full container restart returns the proxy to TOFU. The host CLI surfaces the mismatch (mismatched cache or a 401) loudly with recovery instructions rather than silently retrying.
+**Configuration flow**: `make up` generates `.run/auth.token` (mode 0600) on the host if absent, then bind-mounts it read-only into the proxy at `/run/secrets-ro/auth.token`. The entrypoint stages it onto tmpfs at `/run/secrets/auth.token` (mode 0400, owned by uid 31337); the python process reads it at startup and exits if missing. Config lives on tmpfs at `/run/secrets/config.json`, written by `POST /admin/config`. Lifecycle: the token survives both python respawn and full container restart (host-owned); config survives python respawn only — the host CLI re-pushes after a container restart. A 401 on push means the host file changed after the container started; recovery is `make restart`.
 
 ## Threat model (v1)
 
-- **Workspace container**: cannot read the host filesystem, so cannot read the cached bearer. Can hit `/admin/*` endpoints over the shared netns and gets 401 unless it has the token. The TOFU window is open only between `make up` and the first `push-config`; sequencing closes it before the workspace would be started.
+- **Workspace container**: cannot read the host filesystem, so cannot read `.run/auth.token`. Can hit `/admin/*` endpoints over the shared netns and gets 401 without the token. No window in which `/admin/config` is unauthenticated.
 - **Browser on host**: blocked by Chrome's Private Network Access (we never set `Access-Control-Allow-Private-Network`) plus the `fetch_metadata_guard` middleware (rejects requests with `Sec-Fetch-Site: cross-site`/`same-site`). Both layers act before any handler runs.
-- **Other host users on a multi-user host**: can race TOFU init or, after a container restart, claim the proxy. Damage ceiling is DoS — the user's secrets live in op://, keychain, etc., and only enter the proxy through bearer-authenticated `push-config` calls. Documented limitation; v1 is a single-user dev workstation tool.
+- **Other host users on a multi-user host**: can read `.run/auth.token` only if FS perms permit (mode 0600 keeps it out of reach of other users in the normal case). Damage ceiling is DoS-or-config-replace — the user's secrets live in op://, keychain, etc., and only enter the proxy through bearer-authenticated `push-config` calls. Documented limitation; v1 is a single-user dev workstation tool.
 - **Same-user malicious process**: out of scope (already has access to ssh keys, env vars, etc.).
 
 ## Architecture decisions that should not be casually reversed
@@ -38,8 +38,8 @@ These were spelled out in `design-v0.md` ("Architecture decisions worth preservi
 - **HTTP/3 dropped at netfilter** to force TCP fallback, not intercepted. mitmproxy QUIC is experimental.
 - **IPv6 dropped entirely in v1.**
 - **Bootstrap over plain HTTP from inside the netns is fine** — no eavesdropper exists on shared loopback/link-local. This resolves the chicken-and-egg of trusting the trust source. Don't add TLS or auth to the bootstrap routes.
-- **Single HTTP listener for admin + bootstrap.** Auth (TOFU bearer) gates `/admin/*`; bootstrap routes are open. Browsers are kept out by PNA + Sec-Fetch-Site, not by a separate listener or a separate iptables rule. Don't re-split.
-- **TOFU init, not a pre-shared token.** The proxy starts in a known-empty state; the host CLI claims it on first call. The race window only DoSes (the user's secrets aren't in the proxy yet); the legitimate CLI detects and surfaces a mismatch. Don't replace with a pre-baked token unless you also re-justify the multi-user-host story.
+- **Single HTTP listener for admin + bootstrap.** Bearer auth gates `/admin/*`; bootstrap routes are open. Browsers are kept out by PNA + Sec-Fetch-Site, not by a separate listener or a separate iptables rule. Don't re-split.
+- **Host-owned bearer, bind-mounted into the proxy.** `.run/auth.token` is the source of truth; the proxy reads a tmpfs copy staged by entrypoint. No first-call ceremony, no race window; container restart preserves auth. Don't reintroduce TOFU or in-container token generation.
 - **Credential lookup must go through an interface** that can be swapped for IPC to a host plugin later. Don't hard-code direct config-file reads inside the inject path; the future host-plugin system is informing the v1 design.
 - **Proxy container holds the proxy core; host plugins (future) handle host-touchy things.** Don't push host-touchy logic into the proxy to "simplify"; it breaks cross-platform.
 
@@ -58,8 +58,8 @@ These were spelled out in `design-v0.md` ("Architecture decisions worth preservi
 ## Commands
 
 - `make build` — build the proxy image.
-- `make up` / `make down` / `make restart` — lifecycle. `make up` starts the proxy in TOFU mode (no token, no config). Run `make set-config` immediately after to claim it.
-- `make set-config` — resolve `proxy/config.yaml` `${secret:NAME}` refs from host env and POST via `/admin/config`. First call after `make up` initializes the proxy (TOFU); subsequent calls update config in place. e.g. `GITHUB_PAT=$(op read 'op://...') make set-config`.
+- `make up` / `make down` / `make restart` — lifecycle. `make up` generates `.run/auth.token` if absent, then starts the proxy with that token bind-mounted. Config is empty until `make set-config`.
+- `make set-config` — resolve `proxy/config.yaml` `${secret:NAME}` refs from host env and POST via `/admin/config`. e.g. `GITHUB_PAT=$(op read 'op://...') make set-config`.
 - `make logs` — tail proxy logs.
 - `make reload` — hot-reload python code in the running proxy (kills the python child; the bash supervisor respawns it; state survives via tmpfs).
 - `make shell` — root shell inside the proxy.

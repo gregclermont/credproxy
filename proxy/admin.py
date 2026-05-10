@@ -6,19 +6,19 @@ reaches it via the iptables sentinel:80 -> HTTP_PORT redirect; host
 reaches it via docker -p 127.0.0.1:HTTP_PORT.
 
 Trust model:
-- /admin/state is open: returns {"initialized": bool}; lets the host
-  CLI detect the TOFU window.
-- /admin/config is TOFU on first call: the bearer in that request
-  becomes the canonical admin token (persisted to tmpfs); subsequent
-  calls authenticate against it.
+- /admin/config requires `Authorization: Bearer <token>` matching the
+  token loaded at startup from /run/secrets/auth.token (staged there
+  by entrypoint.sh from the host-mounted .run/auth.token).
 - fetch_metadata_guard rejects cross-origin browser requests; together
   with Chrome's Private Network Access default-deny (we never set
   Access-Control-Allow-Private-Network), this covers the browser
   threat without a shared secret.
 
-Restart: token + config live on tmpfs at /run/secrets/{auth.token,
-config.json}. Survives python respawns; full container restart returns
-to TOFU. The host CLI surfaces the mismatch via a 401 on next push.
+Lifecycle: the token is owned by the host (.run/auth.token, generated
+by `make up` if absent) and bind-mounted read-only into the proxy. It
+survives both python respawn and full container restart. Config lives
+on tmpfs at /run/secrets/config.json -- survives python respawn,
+re-pushed by the host CLI after a full container restart.
 """
 import hmac
 import json
@@ -39,7 +39,7 @@ CONFIG_PATH = Path("/run/secrets/config.json")
 
 @dataclass
 class AppState:
-    token: str = ""  # "" -> TOFU
+    token: str = ""
     creds: Credentials = field(default_factory=lambda: YamlCredentials({}))
 
 
@@ -47,16 +47,25 @@ STATE_KEY: web.AppKey[AppState] = web.AppKey("state", AppState)
 
 
 def load_initial_state() -> AppState:
-    """Boot-time state load. Either file missing -> TOFU."""
-    if not TOKEN_PATH.exists() or not CONFIG_PATH.exists():
-        return AppState()
+    """Boot-time state load. Token is required; config is optional."""
+    if not TOKEN_PATH.exists():
+        raise SystemExit(
+            f"[admin] {TOKEN_PATH} missing -- entrypoint should have staged "
+            f"it from the host-mounted /run/secrets-ro/auth.token"
+        )
+    token = TOKEN_PATH.read_text().strip()
+    if not token:
+        raise SystemExit(f"[admin] {TOKEN_PATH} is empty")
+
+    if not CONFIG_PATH.exists():
+        return AppState(token=token)
     try:
         creds = config.load_resolved(
             json.loads(CONFIG_PATH.read_text()), source=str(CONFIG_PATH)
         )
     except config.ConfigError as e:
         raise SystemExit(f"[admin] persisted config invalid: {e}")
-    return AppState(token=TOKEN_PATH.read_text().strip(), creds=creds)
+    return AppState(token=token, creds=creds)
 
 
 # ---- Middleware ----
@@ -95,13 +104,8 @@ async def access_log(request: web.Request, handler):
 # ---- Admin handlers ----
 
 
-async def admin_state(request: web.Request) -> web.Response:
-    state = request.app[STATE_KEY]
-    return web.json_response({"initialized": bool(state.token)})
-
-
 async def admin_config(request: web.Request) -> web.Response:
-    """POST /admin/config -- TOFU on first call, bearer-gated thereafter."""
+    """POST /admin/config -- bearer-gated config push/reload."""
     state = request.app[STATE_KEY]
 
     header = request.headers.get("Authorization", "")
@@ -113,9 +117,8 @@ async def admin_config(request: web.Request) -> web.Response:
         )
 
     # Authenticate before any body processing so unauthenticated probes
-    # can't fingerprint config schema by reading 400 errors. TOFU is the
-    # exception: any bearer is accepted because we're claiming the proxy.
-    if state.token and not hmac.compare_digest(presented, state.token):
+    # can't fingerprint config schema by reading 400 errors.
+    if not hmac.compare_digest(presented, state.token):
         return web.json_response({"error": "invalid token"}, status=401)
 
     try:
@@ -128,17 +131,7 @@ async def admin_config(request: web.Request) -> web.Response:
     except config.ConfigError as e:
         return web.json_response({"error": str(e)}, status=400)
 
-    body_bytes = json.dumps(body).encode()
-
-    if not state.token:
-        # TOFU: first valid POST claims the proxy.
-        _atomic_write(TOKEN_PATH, presented.encode(), 0o400)
-        _atomic_write(CONFIG_PATH, body_bytes, 0o400)
-        state.token = presented
-        state.creds = new_creds
-        return web.json_response({"ok": True, "initialized": True})
-
-    _atomic_write(CONFIG_PATH, body_bytes, 0o400)
+    _atomic_write(CONFIG_PATH, json.dumps(body).encode(), 0o400)
     state.creds = new_creds
     return web.json_response({"ok": True, "reloaded": True})
 
@@ -152,6 +145,5 @@ def _atomic_write(path: Path, data: bytes, mode: int) -> None:
 
 
 admin_routes = [
-    web.get("/admin/state", admin_state),
     web.post("/admin/config", admin_config),
 ]

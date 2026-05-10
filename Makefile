@@ -6,11 +6,13 @@ WORKSPACE_IMAGE := python:3.12-slim
 
 .PHONY: help build up down restart logs reload shell workspace rebuild test set-config
 
+TOKEN_FILE := .run/auth.token
+
 help:
 	@echo "credproxy dev harness"
 	@echo ""
 	@echo "  make build       build the proxy image"
-	@echo "  make up          start the proxy in TOFU mode (no token, no config)"
+	@echo "  make up          start the proxy (generates $(TOKEN_FILE) if absent)"
 	@echo "  make down        stop and remove the proxy container"
 	@echo "  make restart     down + up (no rebuild)"
 	@echo "  make logs        tail proxy logs"
@@ -21,23 +23,27 @@ help:
 	@echo "  make test        run pytest in the proxy image"
 	@echo "  make set-config  init or update: resolve proxy/config.yaml \$${secret:NAME} refs"
 	@echo "                   from host env and POST via /admin/config."
-	@echo "                   First call after \`make up\` initializes the proxy"
-	@echo "                   (TOFU: claims the bearer token, cached at .run/auth.token);"
-	@echo "                   subsequent calls update config in place."
 	@echo "                   e.g. GITHUB_PAT=\$$(op read 'op://...') make set-config"
 
 build:
 	docker build -t $(PROXY_IMAGE) proxy/
 
-up:
+$(TOKEN_FILE):
+	@mkdir -p $(dir $@)
+	@python3 -c 'import secrets; print(secrets.token_hex(16))' > $@
+	@chmod 0600 $@
+	@echo "generated $@"
+
+up: $(TOKEN_FILE)
 	docker run -d --rm \
 		--name $(PROXY_NAME) \
 		--cap-add NET_ADMIN \
 		--tmpfs /run/secrets:size=64k,uid=31337,mode=0700 \
+		--mount type=bind,source=$(CURDIR)/$(TOKEN_FILE),target=/run/secrets-ro/auth.token,readonly \
 		-p 127.0.0.1:39998:39998 \
 		-v $(CURDIR)/proxy:/opt/proxy \
 		$(PROXY_IMAGE) >/dev/null
-	@echo "$(PROXY_NAME) started; run 'make set-config' to initialize"
+	@echo "$(PROXY_NAME) started; run 'make set-config' to push config"
 
 down:
 	-docker rm -f $(PROXY_NAME) 2>/dev/null

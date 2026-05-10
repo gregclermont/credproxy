@@ -39,8 +39,7 @@ def make_http_app(state: admin.AppState) -> web.Application:
 async def run() -> None:
     state = admin.load_initial_state()
     print(
-        f"[main] state: initialized={bool(state.token)}, "
-        f"intercept_hosts={sorted(state.creds.intercept_hosts())}",
+        f"[main] state: intercept_hosts={sorted(state.creds.intercept_hosts())}",
         flush=True,
     )
 
