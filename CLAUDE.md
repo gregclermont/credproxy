@@ -94,4 +94,4 @@ Surface these rather than picking silently if your work touches one:
 
 - **`/llms.txt` format.** Currently free-form prose; structured/AGENTS.md-style alternatives haven't been evaluated.
 - **Per-request vs. per-host injection.** Currently strictly per-host; no path/method matching.
-- **Proxy CA persistence across recreate.** mitmproxy's CA lives in the proxy container; it survives `stop`/`start` but not a proxy *recreate*, which silently invalidates a CA already trusted inside a persistent workspace. `design-v1.md` proposes a named volume for the CA dir — unimplemented.
+- **Proxy CA persistence across recreate.** mitmproxy's CA is regenerated on a proxy *recreate* (not on stop/start or a crash — those keep the same container). Currently a re-bootstrap cost, not silent breakage: a proxy recreate is coupled to a workspace recreate, and the workspace's CA trust lives only in its writable layer, so the workspace re-bootstraps anyway. Would become a real gap only if CA trust were made durable across workspace recreates. See `design-v1.md` (CA persistence + the auto-bootstrap ideas).

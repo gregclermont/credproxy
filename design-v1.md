@@ -213,16 +213,41 @@ split are all unchanged.
 
 ## Open questions
 
-- **Proxy CA persistence.** mitmproxy's CA lives in the proxy container; it
-  survives stop/start but not a recreate. With a persistent workspace that
-  has already trusted the CA, a regenerated CA silently breaks TLS.
-  Recommended fix: persist the proxy's `.mitmproxy` directory in a named
-  volume (`credproxy-ca-<name>`) so the CA survives recreate.
-- **Auto-bootstrap.** Whether `start` should `docker exec` the bootstrap
-  (`bootstrap.sh`: install CA + env vars) into a freshly-created workspace
-  container automatically, instead of leaving the user to run
-  `curl … | sh`. Bootstrap state lives in the writable layer, so it must
-  re-run after a recreate.
+- **Proxy CA persistence.** mitmproxy's CA lives in the proxy container's
+  writable layer. It survives stop/start and crashes (same container) but
+  not a *recreate*, where mitmproxy mints a fresh CA. This is milder than
+  it first appears: a proxy recreate is coupled to a workspace recreate
+  (the `credproxy.spec` label includes the proxy container id), and
+  `bootstrap.sh` installs CA trust only into the workspace's writable
+  layer — destroyed by that same recreate — so the workspace re-bootstraps
+  anyway and never sits trusting a stale CA. It is a re-bootstrap cost,
+  not silent breakage. Persisting the CA in a named volume
+  (`credproxy-ca-<name>`) becomes genuinely necessary only if CA trust is
+  later made durable across workspace recreates (e.g. bootstrap writes it
+  into the home volume); the CLI-driven bootstrap idea under
+  Auto-bootstrap sidesteps the question entirely.
+- **Auto-bootstrap.** Whether `start` should run the bootstrap
+  (`bootstrap.sh`: install CA + env vars) into the workspace
+  automatically, instead of leaving the user to run `curl … | sh`.
+  Bootstrap state lives in the writable layer, so it must re-run after a
+  recreate. `bootstrap.sh` is idempotent and convergent — every step
+  overwrites a fixed path or runs an idempotent tool — so running it on
+  every `start` is safe. Design ideas to fold in when this is built:
+  - **`auto_bootstrap` toggle.** A config key (default on) to opt out —
+    for images that bake the CA in, or users who bootstrap by hand.
+  - **`provision:` hook.** A Lima-style list of commands run via
+    `docker exec` on workspace creation, *before* bootstrap — covers
+    installing prerequisites such as `curl` (`apt-get` traffic is
+    passthrough, so it works before the CA is trusted). A general
+    provisioning hook is preferred over a bootstrap-specific
+    "pre-bootstrap script".
+  - **CLI-driven bootstrap.** The CLI already speaks HTTP to the proxy
+    from the host, so it can fetch `/ca.crt` (+ `/env.sh`) itself and
+    inject them via `docker cp` / `docker exec`. If `bootstrap.sh` skips
+    its fetch when the cert is already present, one script serves both
+    the manual and auto paths and the auto path needs no `curl` in the
+    workspace image. Running this convergently on every `start` would
+    also make the CA-persistence question above moot.
 - **Harness namespacing.** Confirm `credproxy dev {build,test,reload}` vs.
   leaving those commands top-level.
 - **Mount key names.** Confirm Docker-style `source` / `target` / `readonly`
