@@ -377,3 +377,30 @@ def test_no_args_exits_zero(xdg):
     """No args prints help and exits 0."""
     ec, out, err = _run([])
     assert ec == 0
+
+
+def test_strict_help_is_strict(xdg):
+    """Bare `credproxy` help describes the strict surface and points to credp."""
+    ec, out, err = _run([])
+    combined = out + err
+    assert "Strict surface" in combined
+    assert "credp" in combined  # points to the human alias
+
+
+def test_loose_help_is_loose(xdg):
+    """`credp` (loose) help leads with the short aliases and the default-
+    workspace behavior -- and does NOT mislabel itself as the strict binary."""
+    ec, out, err = _run_loose([])
+    assert ec == 0
+    combined = out + err
+    assert "human surface" in combined
+    assert "credp enter" in combined        # the aliases the loose user needs
+    assert "current default" in combined or "the default" in combined
+    assert "Strict surface" not in combined  # no third-person self-description
+
+
+def test_loose_help_via_help_flag(xdg):
+    """`credp --help` resolves the loose surface too (not just bare invocation)."""
+    ec, out, err = _run(["--loose", "--help"])
+    assert ec == 0
+    assert "human surface" in (out + err)

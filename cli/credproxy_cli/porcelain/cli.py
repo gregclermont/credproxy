@@ -558,32 +558,62 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
 # ---- top-level dispatch ------------------------------------------------------
 
 
-def _print_help() -> None:
-    say(
-        "credproxy -- workspace manager for the credential-injecting proxy.\n"
-        "\n"
-        "Strict surface (this binary). `credp` is the intended human alias\n"
-        "(`credproxy --loose`): it adds default-workspace resolution, short\n"
-        "command aliases, and a confirmation gate on destructive actions.\n"
-        "\n"
-        "Workspaces:\n"
-        "  credproxy workspace create NAME [--image IMG]\n"
-        "  credproxy workspace use NAME\n"
-        "  credproxy workspace list [FILTER]   (or: credproxy list [FILTER])\n"
-        "  credproxy current                   (print the default workspace)\n"
-        "  credproxy workspace NAME enter|start|stop|delete|apply|inspect|logs\n"
-        "  credproxy workspace NAME binding add|remove|list|test ...\n"
-        "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
-        "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
-        "Definitions:\n"
-        "  credproxy injector scaffold NAME | injector list\n"
-        "  credproxy provider scaffold NAME | provider list\n"
-        "Dev harness:\n"
-        "  credproxy dev build|test|reload\n"
-        "\n"
-        "Global flags: --loose (human surface; use the `credp` alias), --json,\n"
-        "  --yes (bypass confirmation)."
-    )
+def _print_help(loose: bool = False) -> None:
+    say(_LOOSE_HELP if loose else _STRICT_HELP)
+
+
+_STRICT_HELP = (
+    "credproxy -- workspace manager for the credential-injecting proxy.\n"
+    "\n"
+    "Strict surface: name every workspace explicitly, no default resolution,\n"
+    "no prompts. The scriptable contract. `credp` is the human alias\n"
+    "(`credproxy --loose`): default-workspace resolution, short aliases, and a\n"
+    "confirmation gate on destructive actions -- run `credp --help` for that.\n"
+    "\n"
+    "Workspaces:\n"
+    "  credproxy workspace create NAME [--image IMG]\n"
+    "  credproxy workspace use NAME\n"
+    "  credproxy workspace list [FILTER]   (or: credproxy list [FILTER])\n"
+    "  credproxy current                   (print the default workspace)\n"
+    "  credproxy workspace NAME enter|start|stop|delete|apply|inspect|logs\n"
+    "  credproxy workspace NAME binding add|remove|list|test ...\n"
+    "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
+    "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
+    "Definitions:\n"
+    "  credproxy injector scaffold NAME | injector list\n"
+    "  credproxy provider scaffold NAME | provider list\n"
+    "Dev harness:\n"
+    "  credproxy dev build|test|reload\n"
+    "\n"
+    "Global flags: --loose (human surface; use the `credp` alias), --json,\n"
+    "  --yes (bypass confirmation)."
+)
+
+
+_LOOSE_HELP = (
+    "credp -- human surface for credproxy (credproxy --loose).\n"
+    "\n"
+    "An omitted workspace resolves to the current default (announced on\n"
+    "stderr); destructive actions on the default workspace ask first.\n"
+    "\n"
+    "Workspaces (omit NAME to act on the default):\n"
+    "  credp use NAME                  set the default workspace\n"
+    "  credp current                   print the default workspace\n"
+    "  credp create NAME [--image IMG]\n"
+    "  credp list [FILTER]\n"
+    "  credp enter|start|stop|delete|apply|inspect|logs [NAME]\n"
+    "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
+    "  credp binding test --provider P --secret REF [--injector I]\n"
+    "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
+    "Definitions:\n"
+    "  credp injector scaffold NAME | injector list\n"
+    "  credp provider scaffold NAME | provider list\n"
+    "Dev harness:\n"
+    "  credp dev build|test|reload\n"
+    "\n"
+    "The canonical `credproxy workspace NAME <verb>` forms work too and are the\n"
+    "scriptable contract. Global flags: --json, --yes (bypass confirmation)."
+)
 
 
 def _split_trailing(argv: list[str]) -> tuple[list[str], list[str]]:
@@ -750,7 +780,7 @@ def main(loose_default: bool = False) -> None:
     loose = loose or loose_default
 
     if not argv or argv[0] in ("-h", "--help", "help"):
-        _print_help()
+        _print_help(loose)
         sys.exit(0)
 
     render.set_format(as_json)
