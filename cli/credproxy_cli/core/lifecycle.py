@@ -134,9 +134,12 @@ def create_proxy(ws: Workspace, meta: ImageEnv) -> None:
         "--tmpfs", f"{meta.tmpfs}:size=64k,mode=1777",
         "--mount",
         f"type=bind,source={ws.token_path},target={meta.token},readonly",
-        # Ephemeral host port: Docker assigns a free port per proxy container
-        # so multiple workspaces can run simultaneously without port conflicts.
-        "-p", f"127.0.0.1:0:{meta.http_port}",
+        # Ephemeral host port: the runtime assigns a free port per proxy
+        # container so multiple workspaces run simultaneously without port
+        # conflicts. The empty host-port spelling (`ip::container`) means
+        # "pick a random port" on both Docker and Podman; Docker also accepts
+        # `:0:` but Podman does not, so use `::` for cross-runtime support.
+        "-p", f"127.0.0.1::{meta.http_port}",
     ]
     # Dev convenience: bind-mount the proxy source so `dev reload` picks
     # up edits. Skipped if run outside the repo checkout.
