@@ -128,6 +128,11 @@ def create_proxy(ws: Workspace, meta: ImageEnv) -> None:
         "--label", "credproxy.role=proxy",
         "--label", f"credproxy.workspace={ws.name}",
         "--cap-add", "NET_ADMIN",
+        # The workspace's own name, exposed to the workspace via /setup (e.g.
+        # to customize the shell prompt). Not a secret -- it is the instance's
+        # handle. Set at create; inherited by the proxy process and persists
+        # across `docker start` / `dev reload`.
+        "-e", f"CREDPROXY_WORKSPACE={ws.name}",
         # mode=1777 so the proxy's unprivileged uid can write config.json:
         # the tmpfs dir's default mode is not writable by it, and Docker
         # mounts it differently on `docker run` vs. a later `docker start`.

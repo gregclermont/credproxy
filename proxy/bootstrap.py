@@ -11,6 +11,7 @@ only the fields the workspace needs for self-configuration:
 It does NOT expose provider, secret-id, or real credential values --
 those never reach the proxy from the push model anyway.
 """
+import os
 from pathlib import Path
 
 from aiohttp import web
@@ -147,6 +148,7 @@ async def setup(request: web.Request) -> web.Response:
     state = request.app[STATE_KEY]
     return web.json_response({
         "version": VERSION,
+        "workspace": os.environ.get("CREDPROXY_WORKSPACE") or None,
         "ca_url": "http://proxy.local/ca.crt",
         "env": CA_ENV,
         "intercept_hosts": sorted(state.creds.intercept_hosts()),

@@ -98,6 +98,10 @@ use as the credential value), `env` (suggested env var, may be null),
 for which injection is active). The real credential is never exposed
 here. Use `http://169.254.1.1` directly if `proxy.local` does not resolve.
 
+The `/setup` response also includes a top-level `workspace` field — the
+workspace's own name (or `null` if unknown) — handy for self-identification
+such as a shell prompt: `WS=$(curl -s http://proxy.local/setup | jq -r .workspace)`.
+
 ## Egress shape
 
 What happens to packets the workspace originates:

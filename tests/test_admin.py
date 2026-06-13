@@ -325,6 +325,25 @@ async def test_setup_reflects_state(aiohttp_client, app, state):
     assert b["hosts"] == ["api.github.com"]
 
 
+async def test_setup_exposes_workspace_name(aiohttp_client, app, monkeypatch):
+    """The workspace's own name is exposed for self-identification (e.g. PS1)."""
+    monkeypatch.setenv("CREDPROXY_WORKSPACE", "myproj")
+    client = await aiohttp_client(app)
+    resp = await client.get("/setup")
+    body = await resp.json()
+    assert body["workspace"] == "myproj"
+
+
+async def test_setup_workspace_name_absent_is_null(aiohttp_client, app, monkeypatch):
+    """Gracefully null when the env var is unset (e.g. a proxy created before
+    this field existed)."""
+    monkeypatch.delenv("CREDPROXY_WORKSPACE", raising=False)
+    client = await aiohttp_client(app)
+    resp = await client.get("/setup")
+    body = await resp.json()
+    assert body["workspace"] is None
+
+
 async def test_setup_least_disclosure(aiohttp_client, app, state):
     """Inward API: real credential values must NOT appear in /setup response."""
     state.creds = BindingCredentials(
