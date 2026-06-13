@@ -97,6 +97,18 @@ def test_params_not_object():
         config.load_resolved({"bindings": [_entry(params="nope")]})
 
 
+def test_params_value_non_string_rejected():
+    with pytest.raises(config.ConfigError, match=r"params\['header'\] must be a string"):
+        config.load_resolved({"bindings": [_entry(params={"header": 123})]})
+
+
+def test_extra_secret_slot_rejected():
+    """The proxy rejects unknown slots (symmetric with the CLI), so stray real
+    values are never held in memory."""
+    with pytest.raises(config.ConfigError, match="needs secret slot"):
+        config.load_resolved({"bindings": [_entry(secret={"value": "t", "extra": "x"})]})
+
+
 @pytest.mark.parametrize("placeholder", [
     pytest.param("", id="empty"),
     pytest.param(None, id="missing"),

@@ -341,7 +341,7 @@ def materialize_bindings(ws: Workspace, notify: Notify = _noop) -> list[Binding]
             injector = find_injector(res.injector)
             # Only the substitute family holds an inert placeholder; sign
             # schemes (sigv4, ...) compute auth material and have none.
-            if get_scheme(injector.scheme).family == "substitute":
+            if get_scheme(injector.scheme).uses_placeholder:
                 ph = injector.placeholder.generate()
                 text = _insert_line_in_block(text, idx, f'placeholder = {_toml_str(ph)}')
                 resolved[idx] = replace(res, placeholder=ph)
@@ -358,10 +358,9 @@ def materialize_bindings(ws: Workspace, notify: Notify = _noop) -> list[Binding]
 # ---- imperative edits -------------------------------------------------------
 
 
-def append_binding(ws: Workspace, binding: Binding) -> None:
-    """Append a fully-formed `[[binding]]` block to the workspace TOML as a
-    text append (preserving the existing file)."""
-    text = ws.config_path.read_text()
+def _render_binding_block(binding: Binding) -> str:
+    """Render a fully-formed `[[binding]]` block (with a leading blank line),
+    escaping every interpolated value so it round-trips as valid TOML."""
     if isinstance(binding.secret, dict):
         # Multi-slot: an inline table keeps the mapping inside the [[binding]]
         # element (a [binding.secret] sub-table is invalid under array-of-tables).
@@ -383,10 +382,22 @@ def append_binding(ws: Workspace, binding: Binding) -> None:
         lines.append(f'placeholder = {_toml_str(binding.placeholder)}')
     if binding.env is not None:
         lines.append(f'env      = {_toml_str(binding.env)}')
-    block = "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n"
+
+
+def append_bindings(ws: Workspace, bindings: list[Binding]) -> None:
+    """Append one or more `[[binding]]` blocks in a SINGLE write, so a
+    multi-binding add (e.g. a preset) lands atomically rather than leaving a
+    partial set on a mid-loop failure."""
+    text = ws.config_path.read_text()
     if text and not text.endswith("\n"):
         text += "\n"
-    ws.config_path.write_text(text + block)
+    ws.config_path.write_text(text + "".join(_render_binding_block(b) for b in bindings))
+
+
+def append_binding(ws: Workspace, binding: Binding) -> None:
+    """Append a single `[[binding]]` block to the workspace TOML."""
+    append_bindings(ws, [binding])
 
 
 def remove_binding(ws: Workspace, name: str) -> None:
@@ -479,7 +490,7 @@ def wire_config(
     for b in bindings:
         injector = find_injector(b.injector)
         spec = get_scheme(injector.scheme)
-        if spec.family == "substitute" and b.placeholder is None:
+        if spec.uses_placeholder and b.placeholder is None:
             raise ConfigError(
                 f"binding '{b.name}' has no placeholder; materialize it first"
             )

@@ -177,6 +177,17 @@ def test_basic_swaps_username_component():
     assert flow.request.headers["Authorization"] == _basic("REAL", "x-oauth-basic")
 
 
+def test_basic_swaps_with_lowercase_scheme_token():
+    """The auth-scheme token is case-insensitive (RFC 7235): 'basic' works."""
+    log = addon.HostnameLogger(make_state({
+        "github.com": [_t("basic", "PH", "REAL")]
+    }))
+    blob = base64.b64encode(b"alice:PH").decode()
+    flow = make_flow(host="github.com", headers={"Authorization": "basic " + blob})
+    log.request(flow)
+    assert flow.request.headers["Authorization"] == _basic("alice", "REAL")
+
+
 def test_basic_no_swap_when_no_match():
     log = addon.HostnameLogger(make_state({
         "github.com": [_t("basic", "PH", "REAL")]

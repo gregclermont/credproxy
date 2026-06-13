@@ -121,18 +121,6 @@ def _fail(msg: str) -> None:
     raise ConfigError(f"[config] {msg}")
 
 
-def _location_key(scheme_name: str, params: dict) -> tuple:
-    """Where on the wire this scheme writes — for host collision detection.
-    Mirrors core/schemes.location_key on the CLI side."""
-    if scheme_name in ("bearer", "basic"):
-        return ("header", params.get("header", "Authorization"))
-    if scheme_name == "sigv4":
-        return ("header", "Authorization")
-    if scheme_name == "body":
-        return ("body",)
-    return (scheme_name,)
-
-
 def _check_unresolved(value: str, source: str, where: str) -> None:
     m = _SECRET_REF.search(value)
     if m:
@@ -193,6 +181,12 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
         params = entry.get("params", {})
         if not isinstance(params, dict):
             _fail(f"{source}: {where}.params must be an object")
+        # Param values must be strings (current schemes use only string params,
+        # e.g. `header`). A non-string would silently break injection at request
+        # time; relax this if a scheme ever needs structured params.
+        for pk, pv in params.items():
+            if not isinstance(pv, str):
+                _fail(f"{source}: {where}.params['{pk}'] must be a string")
 
         # --- secret (slot -> value) ---
         secret = entry.get("secret")
@@ -202,11 +196,15 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
             if not isinstance(val, str) or not val:
                 _fail(f"{source}: {where}.secret['{slot}'] must be a non-empty string")
             _check_unresolved(val, source, f"{where}.secret['{slot}']")
-        missing = [s for s in scheme.slots if s not in secret]
-        if missing:
+        # Slots must match the scheme's declared set exactly -- missing slots
+        # break injection; extra slots mean stray resolved secret values held in
+        # memory. Symmetric with the CLI's validate().
+        want = set(scheme.slots)
+        got = set(secret)
+        if got != want:
             _fail(
                 f"{source}: {where} scheme '{scheme_name}' needs secret slot(s) "
-                f"{', '.join(missing)}"
+                f"{{{', '.join(sorted(want))}}}, got {{{', '.join(sorted(got))}}}"
             )
 
         # --- placeholder (required for the substitute family) ---
@@ -224,7 +222,7 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
             _fail(f"{source}: {where}.env must be a non-empty string or absent/null")
 
         # --- (host, location) uniqueness ---
-        loc = _location_key(scheme_name, params)
+        loc = schemes.location_key(scheme, params)
         for host in binding_hosts:
             key = (host, loc)
             if key in loc_seen:

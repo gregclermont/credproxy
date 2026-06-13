@@ -365,7 +365,7 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     # Sign schemes (sigv4, ...) hold no inert placeholder; only substitute
     # schemes do, and only those get one auto-generated.
-    if get_scheme(injector.scheme).family == "substitute":
+    if get_scheme(injector.scheme).uses_placeholder:
         placeholder = a.placeholder or injector.placeholder.generate()
     else:
         placeholder = a.placeholder
@@ -387,7 +387,7 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         "name": bname,
         "injector": binding.injector,
         "provider": binding.provider,
-        "secret": core_bindings.secret_display(binding.secret),
+        "secret": binding.secret,
         "hosts": list(binding.hosts),
         "placeholder": placeholder,
         "env": env,
@@ -418,14 +418,13 @@ def _do_binding_preset(ctx: Ctx, name: str | None, a: argparse.Namespace) -> Non
         if b.name in taken:
             fail(f"binding name '{b.name}' already exists in workspace '{ws.name}'")
     core_bindings.validate(existing + new, str(ws.config_path))
-    for b in new:
-        core_bindings.append_binding(ws, b)
+    core_bindings.append_bindings(ws, new)   # one atomic write
     for b in new:
         render.OUT.binding_added(b.name, ws.name, {
             "name": b.name,
             "injector": b.injector,
             "provider": b.provider,
-            "secret": core_bindings.secret_display(b.secret),
+            "secret": b.secret,
             "hosts": list(b.hosts),
             "placeholder": b.placeholder,
             "env": b.env,
@@ -454,7 +453,7 @@ def do_binding_list(ctx: Ctx, name: str | None) -> None:
             "name": b.name,
             "injector": b.injector,
             "provider": b.provider,
-            "secret": core_bindings.secret_display(b.secret),
+            "secret": b.secret,
             "hosts": list(b.hosts),
             "placeholder": b.placeholder,
             "env": b.env,

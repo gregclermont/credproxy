@@ -167,9 +167,25 @@ class Scheme(Protocol):
     name: str
     family: str
     slots: tuple[str, ...]
+    # Where on the wire the scheme writes, used for collision detection. A
+    # "header" scheme writes the header named by params["header"] (default
+    # `header_default`); a "body" scheme writes the request body. See
+    # location_key(); mirrored on the CLI's SchemeSpec.
+    location_kind: str
+    header_default: str | None
 
     def on_request(self, ctx: RequestCtx) -> bool: ...
     def on_response(self, ctx: ResponseCtx) -> bool: ...
+
+
+def location_key(scheme: "Scheme", params: dict) -> tuple:
+    """The wire location a scheme writes, as a hashable key. Two bindings that
+    return the same key on the same host collide. Data-driven (no per-scheme
+    name matching): header schemes key on the resolved header name, others on
+    their location_kind."""
+    if scheme.location_kind == "header":
+        return ("header", params.get("header", scheme.header_default))
+    return (scheme.location_kind,)
 
 
 class _SubstituteScheme:
@@ -190,6 +206,8 @@ class BearerScheme(_SubstituteScheme):
     the placeholder substring, never the whole value."""
 
     name = "bearer"
+    location_kind = "header"
+    header_default = "Authorization"
 
     def on_request(self, ctx: RequestCtx) -> bool:
         header = ctx.params.get("header", "Authorization")
@@ -211,6 +229,8 @@ class BasicScheme(_SubstituteScheme):
     comes straight from the wire, so no username config is needed."""
 
     name = "basic"
+    location_kind = "header"
+    header_default = "Authorization"
 
     def on_request(self, ctx: RequestCtx) -> bool:
         header = ctx.params.get("header", "Authorization")
@@ -218,7 +238,9 @@ class BasicScheme(_SubstituteScheme):
         if value is None or ctx.placeholder is None:
             return False
         prefix = "Basic "
-        if not value.startswith(prefix):
+        # The auth-scheme token is case-insensitive (RFC 7235), so accept
+        # "basic"/"BASIC"; we re-emit canonical "Basic ".
+        if value[:len(prefix)].lower() != prefix.lower():
             return False
         try:
             user, sep, pw = ctx.b64decode(value[len(prefix):].strip()) \
@@ -244,6 +266,8 @@ class BodyScheme(_SubstituteScheme):
     transparently handles content-encoding."""
 
     name = "body"
+    location_kind = "body"
+    header_default = None
 
     def on_request(self, ctx: RequestCtx) -> bool:
         text = ctx.body_text()
@@ -326,6 +350,7 @@ def sigv4_resign(
     header_get,
     body: bytes,
     scope: dict,
+    amz_date: str,
     access_key_id: str,
     secret_access_key: str,
 ) -> str:
@@ -333,13 +358,13 @@ def sigv4_resign(
     incoming credential scope, then return a fresh `Authorization` value signed
     with the real key. The workspace's SDK already chose the SignedHeaders and
     payload hash (signing with throwaway creds); we reproduce its canonical
-    request byte-for-byte and only swap the access key id + signature."""
+    request byte-for-byte and only swap the access key id + signature.
+
+    `amz_date` is the full request timestamp the StringToSign is keyed to (the
+    caller resolves it from X-Amz-Date / Date)."""
     date, region, service = scope["date"], scope["region"], scope["service"]
     signed = sorted(h.lower() for h in scope["signed_headers"])
     signed_headers_str = ";".join(signed)
-
-    # X-Amz-Date carries the full timestamp the StringToSign is keyed to.
-    amz_date = header_get("x-amz-date") or header_get("X-Amz-Date") or ""
 
     # Canonical URI: the wire path is already encoded once. Non-S3 services
     # encode it again (the notorious double-encode); S3 takes it as-is.
@@ -405,6 +430,11 @@ class SigV4Scheme:
     name = "sigv4"
     family = "sign"
     slots = ("access_key_id", "secret_access_key")
+    # sigv4 rewrites the Authorization header, so it collides with a
+    # bearer/basic binding on the same host. It ignores params (region/service
+    # come from the request), so the header is always the default.
+    location_kind = "header"
+    header_default = "Authorization"
 
     def on_request(self, ctx: RequestCtx) -> bool:
         auth = ctx.header_get("Authorization")
@@ -427,6 +457,19 @@ class SigV4Scheme:
                 flush=True,
             )
             return False
+        # The StringToSign is keyed to the request timestamp. SDKs send
+        # X-Amz-Date; a few use the Date header. Without either we can't
+        # reproduce what was signed -- refuse rather than sign over an empty
+        # timestamp.
+        amz_date = ctx.header_get("x-amz-date") or ctx.header_get("date")
+        if not amz_date:
+            print(
+                "[sigv4] request has no X-Amz-Date or Date header; cannot "
+                "reproduce the timestamp the request was signed with. Leaving "
+                "the request unsigned-as-is.",
+                flush=True,
+            )
+            return False
         ctx.header_set("Authorization", sigv4_resign(
             method=ctx.method,
             path=ctx.path,
@@ -434,6 +477,7 @@ class SigV4Scheme:
             header_get=ctx.header_get,
             body=ctx.body_bytes(),
             scope=scope,
+            amz_date=amz_date,
             access_key_id=ctx.secret("access_key_id"),
             secret_access_key=ctx.secret("secret_access_key"),
         ))

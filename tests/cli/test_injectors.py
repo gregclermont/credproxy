@@ -114,6 +114,19 @@ def test_injector_params_not_table(xdg):
         find_injector("badparams")
 
 
+def test_injector_params_value_non_string(xdg):
+    from credproxy_cli.core.errors import InjectorError
+    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.paths import injectors_config_dir
+
+    user_dir = injectors_config_dir()
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "badpv.toml").write_text('scheme = "bearer"\n[params]\nheader = 123\n')
+
+    with pytest.raises(InjectorError, match=r"params\['header'\] must be a string"):
+        find_injector("badpv")
+
+
 def test_injector_placeholder_unknown_charset(xdg):
     from credproxy_cli.core.errors import InjectorError
     from credproxy_cli.core.injectors import find_injector

@@ -28,6 +28,18 @@ class SchemeSpec:
     family: str               # "substitute" | "sign"
     slots: tuple[str, ...]
     param_defaults: dict = field(default_factory=dict)
+    # Where on the wire the scheme writes (mirrors proxy/schemes). "header"
+    # schemes write the header named by params["header"] (default
+    # `header_default`); "body" schemes write the request body. Drives
+    # collision detection without per-scheme name matching.
+    location_kind: str = "header"
+    header_default: str | None = "Authorization"
+
+    @property
+    def uses_placeholder(self) -> bool:
+        """Substitute-family schemes hold an inert placeholder; sign schemes
+        (sigv4, ...) compute auth material and have none."""
+        return self.family == "substitute"
 
 
 CATALOG: dict[str, SchemeSpec] = {
@@ -35,9 +47,11 @@ CATALOG: dict[str, SchemeSpec] = {
                          {"header": "Authorization"}),
     "basic":  SchemeSpec("basic",  "substitute", ("value",),
                          {"header": "Authorization"}),
-    "body":   SchemeSpec("body",   "substitute", ("value",), {}),
+    "body":   SchemeSpec("body",   "substitute", ("value",), {},
+                         location_kind="body", header_default=None),
     # Sign family: AWS SigV4. region/service are read from the request, so no
-    # params; the workspace holds throwaway creds and the proxy re-signs.
+    # params; the workspace holds throwaway creds and the proxy re-signs. It
+    # rewrites the Authorization header, so it collides there.
     "sigv4":  SchemeSpec("sigv4",  "sign", ("access_key_id", "secret_access_key"), {}),
 }
 
@@ -64,15 +78,9 @@ def merge_params(spec: SchemeSpec, params: dict | None) -> dict:
 
 def location_key(spec: SchemeSpec, params: dict) -> tuple:
     """A stable identifier for *where on the wire* this scheme writes, used to
-    detect two bindings colliding on the same host. Header-based substitute
-    schemes collide on (\"header\", <name>); body collides on (\"body\",).
-    Sign schemes get their own keys as they land."""
-    if spec.name in ("bearer", "basic"):
-        return ("header", params.get("header", "Authorization"))
-    if spec.name == "sigv4":
-        # sigv4 rewrites the Authorization header, so it collides with a
-        # bearer/basic binding on the same host.
-        return ("header", "Authorization")
-    if spec.name == "body":
-        return ("body",)
-    return (spec.name,)
+    detect two bindings colliding on the same host. Data-driven (no per-scheme
+    name matching): header schemes key on the resolved header name, others on
+    their location_kind. Mirrors proxy/schemes.location_key."""
+    if spec.location_kind == "header":
+        return ("header", params.get("header", spec.header_default))
+    return (spec.location_kind,)

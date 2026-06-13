@@ -47,12 +47,12 @@ class HostnameLogger:
             ctx = RequestCtx(req, t.secrets, t.params, t.placeholder)
             try:
                 if t.scheme.on_request(ctx):
-                    applied.append(t.scheme)
+                    applied.append(t.scheme.name)
             except Exception as e:  # a scheme must never take the flow down
                 print(f"[scheme] {t.scheme.name} on {host} failed: {e}", flush=True)
 
         if applied:
-            marker = f" (inject:{','.join(s.name for s in applied)})"
+            marker = f" (inject:{','.join(applied)})"
         elif host in creds.intercept_hosts():
             marker = " (no-inject)"
         else:

@@ -50,6 +50,7 @@ def test_resign_matches_aws_published_vector():
         body=b"",
         scope={"date": "20150830", "region": "us-east-1", "service": "iam",
                "signed_headers": ["content-type", "host", "x-amz-date"]},
+        amz_date=AMZ_DATE,
         access_key_id=AKID,
         secret_access_key=SECRET,
     )
@@ -130,3 +131,34 @@ def test_addon_refuses_resign_with_session_token():
     flow = tflow.tflow(req=req)
     addon.HostnameLogger(_state({"iam.amazonaws.com": [_sigv4_transform()]})).request(flow)
     assert flow.request.headers["authorization"] == orig  # unchanged, not re-signed
+
+
+def test_addon_refuses_resign_without_timestamp_header():
+    """Without X-Amz-Date or Date, the proxy can't reproduce the signed
+    timestamp, so it refuses rather than signing over an empty one."""
+    req = tutils.treq(host="iam.amazonaws.com", method=b"GET", path=b"/", content=b"")
+    req.headers.clear()
+    req.headers["host"] = "iam.amazonaws.com"
+    orig = (f"AWS4-HMAC-SHA256 Credential=THROWAWAY/{SCOPE_STR}, "
+            "SignedHeaders=host, Signature=00")
+    req.headers["authorization"] = orig
+    flow = tflow.tflow(req=req)
+    addon.HostnameLogger(_state({"iam.amazonaws.com": [_sigv4_transform()]})).request(flow)
+    assert flow.request.headers["authorization"] == orig  # refused
+
+
+def test_addon_resigns_using_date_header_fallback():
+    """A request that carries only a Date header (no X-Amz-Date) is still
+    re-signed, keyed to that timestamp."""
+    req = tutils.treq(host="iam.amazonaws.com", method=b"GET", path=b"/", content=b"")
+    req.headers.clear()
+    req.headers["host"] = "iam.amazonaws.com"
+    req.headers["date"] = AMZ_DATE
+    orig = (f"AWS4-HMAC-SHA256 Credential=THROWAWAY/{SCOPE_STR}, "
+            "SignedHeaders=host, Signature=00")
+    req.headers["authorization"] = orig
+    flow = tflow.tflow(req=req)
+    addon.HostnameLogger(_state({"iam.amazonaws.com": [_sigv4_transform()]})).request(flow)
+    auth = flow.request.headers["authorization"]
+    assert auth != orig
+    assert auth.startswith(f"AWS4-HMAC-SHA256 Credential={AKID}/{SCOPE_STR}")

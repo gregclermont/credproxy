@@ -167,12 +167,13 @@ class Renderer:
 
     # -- binding add --
     def binding_added(self, name: str, ws: str, b: dict) -> None:
+        from ..core.bindings import secret_display
         print(f"added binding '{name}' to workspace '{ws}'")
         print(f"  injector    {b['injector']}")
         print(f"  provider    {b['provider']}")
-        print(f"  secret      {b['secret']}")
+        print(f"  secret      {secret_display(b['secret'])}")
         print(f"  hosts       {', '.join(b['hosts'])}")
-        print(f"  placeholder {b['placeholder']}")
+        print(f"  placeholder {b['placeholder'] or '(none)'}")
         if b.get("env"):
             print(f"  env         {b['env']}")
 
@@ -181,6 +182,7 @@ class Renderer:
 
     # -- binding list --
     def binding_list(self, ws: str, rows: list[dict]) -> None:
+        from ..core.bindings import secret_display
         if not rows:
             print(f"no bindings in workspace '{ws}'")
             return
@@ -188,7 +190,7 @@ class Renderer:
         table = [header]
         for b in rows:
             table.append((
-                b["name"], b["injector"], b["provider"], b["secret"],
+                b["name"], b["injector"], b["provider"], secret_display(b["secret"]),
                 ",".join(b["hosts"]), b["env"] or "-", b["placeholder"] or "-",
             ))
         widths = [max(len(row[i]) for row in table) for i in range(len(header) - 1)]
