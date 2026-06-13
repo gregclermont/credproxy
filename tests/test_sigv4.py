@@ -112,3 +112,21 @@ def test_addon_ignores_non_sigv4_request():
     flow = tflow.tflow(req=req)
     addon.HostnameLogger(_state({"iam.amazonaws.com": [_sigv4_transform()]})).request(flow)
     assert flow.request.headers["authorization"] == "Bearer something"
+
+
+def test_addon_refuses_resign_with_session_token():
+    """Temporary (STS) creds carry X-Amz-Security-Token; the proxy can't pair a
+    real long-term key with a throwaway session token, so it refuses to re-sign
+    and leaves the request unmodified (rather than emitting a doomed signature)."""
+    req = tutils.treq(host="iam.amazonaws.com", method=b"GET",
+                      path=b"/?Action=ListUsers&Version=2010-05-08", content=b"")
+    req.headers.clear()
+    req.headers["host"] = "iam.amazonaws.com"
+    req.headers["x-amz-date"] = AMZ_DATE
+    req.headers["x-amz-security-token"] = "throwaway-session-token"
+    orig = (f"AWS4-HMAC-SHA256 Credential=THROWAWAY/{SCOPE_STR}, "
+            "SignedHeaders=host;x-amz-date;x-amz-security-token, Signature=00")
+    req.headers["authorization"] = orig
+    flow = tflow.tflow(req=req)
+    addon.HostnameLogger(_state({"iam.amazonaws.com": [_sigv4_transform()]})).request(flow)
+    assert flow.request.headers["authorization"] == orig  # unchanged, not re-signed

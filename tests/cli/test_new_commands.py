@@ -9,7 +9,54 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from test_porcelain import _run, _run_loose
+
+
+# ---- _parse_secret_args ------------------------------------------------------
+
+
+def test_parse_secret_single_bare():
+    from credproxy_cli.porcelain.cli import _parse_secret_args
+    assert _parse_secret_args(["GITHUB_TOKEN"]) == "GITHUB_TOKEN"
+
+
+def test_parse_secret_single_bare_with_equals():
+    """A lone ref containing '=' stays a bare single-slot ref (not split)."""
+    from credproxy_cli.porcelain.cli import _parse_secret_args
+    assert _parse_secret_args(["op://v/i?ver=2"]) == "op://v/i?ver=2"
+
+
+def test_parse_secret_none():
+    from credproxy_cli.porcelain.cli import _parse_secret_args
+    assert _parse_secret_args(None) is None
+    assert _parse_secret_args([]) is None
+
+
+def test_parse_secret_multi_slot():
+    from credproxy_cli.porcelain.cli import _parse_secret_args
+    assert _parse_secret_args(["access_key_id=A", "secret_access_key=B"]) == {
+        "access_key_id": "A", "secret_access_key": "B"}
+
+
+def test_parse_secret_multi_slot_ref_with_equals():
+    """REF is split on the FIRST '=', so a ref containing '=' survives."""
+    from credproxy_cli.porcelain.cli import _parse_secret_args
+    assert _parse_secret_args(["k=op://v/i?x=1", "j=B"]) == {
+        "k": "op://v/i?x=1", "j": "B"}
+
+
+def test_parse_secret_multi_requires_slot_eq():
+    from credproxy_cli.porcelain.cli import _parse_secret_args
+    with pytest.raises(SystemExit):
+        _parse_secret_args(["bare1", "bare2"])
+
+
+def test_parse_secret_multi_duplicate_slot():
+    from credproxy_cli.porcelain.cli import _parse_secret_args
+    with pytest.raises(SystemExit):
+        _parse_secret_args(["k=A", "k=B"])
 
 
 # ---- current -----------------------------------------------------------------

@@ -254,6 +254,43 @@ def _block_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+# A TOML bare key (unquoted): letters, digits, '_', '-'. Anything else must be
+# emitted as a quoted key.
+_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+$")
+
+
+def _toml_str(value: str) -> str:
+    """Render `value` as a TOML basic-string literal (quoted + escaped).
+
+    Values written into the config (secret refs, hosts, env, placeholder, name)
+    are user-supplied; interpolating them raw would let a `"`, `\\`, or newline
+    corrupt the file or inject TOML. This escapes per the TOML basic-string
+    rules so any value round-trips."""
+    out = ['"']
+    for ch in value:
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch < " " or ch == "\x7f":
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+def _toml_key(key: str) -> str:
+    """A TOML key: bare when it's a safe identifier, else a quoted literal."""
+    return key if _BARE_KEY_RE.match(key) else _toml_str(key)
+
+
 def _insert_line_in_block(text: str, block_index: int, line: str) -> str:
     """Append `line` (no trailing newline) at the end of the block-index'th
     `[[binding]]` block, preserving everything else verbatim."""
@@ -297,7 +334,7 @@ def materialize_bindings(ws: Workspace, notify: Notify = _noop) -> list[Binding]
     # Re-index spans after each edit since line numbers shift.
     for idx, (orig, res) in enumerate(zip(bindings, resolved)):
         if orig.name is None:
-            text = _insert_line_in_block(text, idx, f'name = "{res.name}"')
+            text = _insert_line_in_block(text, idx, f'name = {_toml_str(res.name)}')
             notify(f"materialized name '{res.name}' for binding [{idx}]")
             changed = True
         if orig.placeholder is None:
@@ -306,7 +343,7 @@ def materialize_bindings(ws: Workspace, notify: Notify = _noop) -> list[Binding]
             # schemes (sigv4, ...) compute auth material and have none.
             if get_scheme(injector.scheme).family == "substitute":
                 ph = injector.placeholder.generate()
-                text = _insert_line_in_block(text, idx, f'placeholder = "{ph}"')
+                text = _insert_line_in_block(text, idx, f'placeholder = {_toml_str(ph)}')
                 resolved[idx] = replace(res, placeholder=ph)
                 notify(f"materialized placeholder for binding '{res.name}'")
                 changed = True
@@ -328,23 +365,24 @@ def append_binding(ws: Workspace, binding: Binding) -> None:
     if isinstance(binding.secret, dict):
         # Multi-slot: an inline table keeps the mapping inside the [[binding]]
         # element (a [binding.secret] sub-table is invalid under array-of-tables).
-        inner = ", ".join(f'{slot} = "{ref}"' for slot, ref in binding.secret.items())
+        inner = ", ".join(f'{_toml_key(slot)} = {_toml_str(ref)}'
+                          for slot, ref in binding.secret.items())
         secret_line = f"secret   = {{ {inner} }}"
     else:
-        secret_line = f'secret   = "{binding.secret}"'
+        secret_line = f'secret   = {_toml_str(binding.secret)}'
     lines = [
         "",
         "[[binding]]",
-        f'name     = "{binding.name}"',
-        f'injector = "{binding.injector}"',
-        f'provider = "{binding.provider}"',
+        f'name     = {_toml_str(binding.name)}',
+        f'injector = {_toml_str(binding.injector)}',
+        f'provider = {_toml_str(binding.provider)}',
         secret_line,
-        "hosts    = [" + ", ".join(f'"{h}"' for h in binding.hosts) + "]",
+        "hosts    = [" + ", ".join(_toml_str(h) for h in binding.hosts) + "]",
     ]
     if binding.placeholder is not None:
-        lines.append(f'placeholder = "{binding.placeholder}"')
+        lines.append(f'placeholder = {_toml_str(binding.placeholder)}')
     if binding.env is not None:
-        lines.append(f'env      = "{binding.env}"')
+        lines.append(f'env      = {_toml_str(binding.env)}')
     block = "\n".join(lines) + "\n"
     if text and not text.endswith("\n"):
         text += "\n"
@@ -398,7 +436,9 @@ def test_binding(
         values = fetch_many(binding.provider, list(dict.fromkeys(refs.values())))
     except CredproxyError as e:
         return BindingTestResult(binding.name, False, None, str(e))
-    total = sum(len(values[ref]) for ref in refs.values())
+    # Sum over distinct fetched values, not per-slot, so a ref shared by two
+    # slots is counted once.
+    total = sum(len(v) for v in values.values())
     return BindingTestResult(binding.name, True, total, None)
 
 

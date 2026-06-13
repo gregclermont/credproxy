@@ -37,19 +37,15 @@ from typing import Protocol
 from urllib.parse import unquote
 
 
-class RequestCtx:
-    """The trusted surface a scheme acts through.
+class _Ctx:
+    """Shared context base: the secret door + encoding primitives.
 
-    Wraps a mitmproxy request plus this binding's resolved secret slots and
-    scheme params. A scheme can read/modify the request only via these
-    primitives and reach the real value only via `secret()`; it never sees the
-    mitmproxy flow object directly (this mirrors the OpaquePythonObject the
-    Starlark escape hatch will hand scripts later).
-    """
+    A scheme reaches the real value only via `secret()` and never sees the
+    mitmproxy objects directly (this mirrors the OpaquePythonObject the Starlark
+    escape hatch will hand scripts later)."""
 
-    def __init__(self, request, secrets: dict[str, str], params: dict,
+    def __init__(self, secrets: dict[str, str], params: dict,
                  placeholder: str | None):
-        self._req = request
         self._secrets = secrets
         self.params = params
         self.placeholder = placeholder
@@ -60,6 +56,29 @@ class RequestCtx:
             return self._secrets[slot]
         except KeyError:
             raise KeyError(f"no secret slot {slot!r} (have {sorted(self._secrets)})")
+
+    # -- encoding primitives --
+    @staticmethod
+    def b64encode(raw: bytes) -> str:
+        return base64.b64encode(raw).decode("ascii")
+
+    @staticmethod
+    def b64decode(s: str) -> bytes:
+        return base64.b64decode(s)
+
+
+class RequestCtx(_Ctx):
+    """The request-phase surface (passed to `on_request`).
+
+    Wraps a mitmproxy request plus this binding's resolved secret slots and
+    scheme params; a scheme reads/modifies the request only through these
+    primitives.
+    """
+
+    def __init__(self, request, secrets: dict[str, str], params: dict,
+                 placeholder: str | None):
+        super().__init__(secrets, params, placeholder)
+        self._req = request
 
     # -- request line / host (read-only; sign schemes canonicalize over these) --
     @property
@@ -93,14 +112,55 @@ class RequestCtx:
     def set_body_text(self, text: str) -> None:
         self._req.text = text
 
-    # -- encoding primitives --
-    @staticmethod
-    def b64encode(raw: bytes) -> str:
-        return base64.b64encode(raw).decode("ascii")
 
-    @staticmethod
-    def b64decode(s: str) -> bytes:
-        return base64.b64decode(s)
+class ResponseCtx(_Ctx):
+    """The response-phase surface (passed to `on_response`).
+
+    Wraps the whole flow so a re-seal/mint scheme can READ the request it
+    answered (host/path/method — to know which binding/endpoint this is) and
+    READ or MUTATE the response (e.g. extract a minted token from the body and
+    register a dynamic placeholder). Distinct from RequestCtx because the
+    request accessors here are read-only and the mutating header/body
+    primitives act on the response, not the request.
+    """
+
+    def __init__(self, flow, secrets: dict[str, str], params: dict,
+                 placeholder: str | None):
+        super().__init__(secrets, params, placeholder)
+        self._flow = flow
+
+    # -- the request that was sent (read-only) --
+    @property
+    def request_method(self) -> str:
+        return self._flow.request.method
+
+    @property
+    def request_path(self) -> str:
+        return self._flow.request.path
+
+    @property
+    def request_host(self) -> str:
+        return self._flow.request.host
+
+    def request_header_get(self, name: str) -> str | None:
+        return self._flow.request.headers.get(name)
+
+    # -- the response (read / mutate) --
+    @property
+    def status_code(self) -> int:
+        return self._flow.response.status_code
+
+    def header_get(self, name: str) -> str | None:
+        return self._flow.response.headers.get(name)
+
+    def header_set(self, name: str, value: str) -> None:
+        self._flow.response.headers[name] = value
+
+    def body_text(self) -> str | None:
+        return self._flow.response.text
+
+    def set_body_text(self, text: str) -> None:
+        self._flow.response.text = text
 
 
 class Scheme(Protocol):
@@ -109,7 +169,7 @@ class Scheme(Protocol):
     slots: tuple[str, ...]
 
     def on_request(self, ctx: RequestCtx) -> bool: ...
-    def on_response(self, ctx: RequestCtx) -> bool: ...
+    def on_response(self, ctx: ResponseCtx) -> bool: ...
 
 
 class _SubstituteScheme:
@@ -119,7 +179,7 @@ class _SubstituteScheme:
     family = "substitute"
     slots = ("value",)
 
-    def on_response(self, ctx: RequestCtx) -> bool:  # noqa: D401 - no-op seam
+    def on_response(self, ctx: ResponseCtx) -> bool:  # noqa: D401 - no-op seam
         return False
 
 
@@ -353,6 +413,20 @@ class SigV4Scheme:
         scope = _parse_sigv4_authorization(auth)
         if scope is None:
             return False
+        # Temporary (STS) credentials carry X-Amz-Security-Token, which the SDK
+        # signs. We re-sign with the binding's LONG-TERM key, which has no
+        # session token -- pairing a real key with the workspace's throwaway
+        # token always yields a request AWS rejects. Refuse loudly instead of
+        # silently emitting a doomed signature.
+        if ctx.header_get("x-amz-security-token") is not None:
+            print(
+                "[sigv4] request carries X-Amz-Security-Token (temporary "
+                "credentials); credproxy re-signs with long-term keys only -- "
+                "configure the workspace with dummy STATIC AWS credentials "
+                "(no session token). Leaving the request unsigned-as-is.",
+                flush=True,
+            )
+            return False
         ctx.header_set("Authorization", sigv4_resign(
             method=ctx.method,
             path=ctx.path,
@@ -365,7 +439,7 @@ class SigV4Scheme:
         ))
         return True
 
-    def on_response(self, ctx: RequestCtx) -> bool:  # noqa: D401 - no-op seam
+    def on_response(self, ctx: ResponseCtx) -> bool:  # noqa: D401 - no-op seam
         return False
 
 

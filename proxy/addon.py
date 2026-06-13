@@ -19,7 +19,7 @@ bootstrap) on a separate port, so this addon never sees those flows.
 """
 from mitmproxy import http, tls
 
-from schemes import RequestCtx
+from schemes import RequestCtx, ResponseCtx
 
 
 class HostnameLogger:
@@ -67,7 +67,9 @@ class HostnameLogger:
         creds = self._state.creds
         host = flow.request.pretty_host
         for t in creds.transforms_for(host):
-            ctx = RequestCtx(flow.response, t.secrets, t.params, t.placeholder)
+            # ResponseCtx wraps the whole flow: a re-seal scheme can read the
+            # request it answered (host/path) AND read/mutate the response.
+            ctx = ResponseCtx(flow, t.secrets, t.params, t.placeholder)
             try:
                 t.scheme.on_response(ctx)
             except Exception as e:

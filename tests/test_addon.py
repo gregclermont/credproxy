@@ -199,13 +199,38 @@ def test_body_substitutes_placeholder():
     assert flow.request.text == "grant_type=client_credentials&client_secret=REAL"
 
 
-# ---- response: no-op seam ----
+# ---- response: no-op seam + ResponseCtx ----
 
 def test_response_hook_is_noop_for_substitute_schemes():
-    """The response hook is plumbed but does nothing for substitute schemes."""
+    """The response hook is plumbed but leaves request and response untouched
+    for substitute schemes."""
     log = addon.HostnameLogger(make_state({
         "api.github.com": [_t("bearer", "PH", "REAL")]
     }))
-    flow = make_flow(headers={"Authorization": "Bearer PH"})
-    # Should not raise and should not touch the (unset) response.
-    log.response(flow)
+    req = tutils.treq(host="api.github.com")
+    req.headers.clear()
+    req.headers["Authorization"] = "Bearer PH"
+    flow = tflow.tflow(req=req, resp=True)
+    flow.response.headers["X-Orig"] = "v"
+    log.response(flow)  # must not raise
+    assert flow.request.headers["Authorization"] == "Bearer PH"
+    assert flow.response.headers["X-Orig"] == "v"
+
+
+def test_response_ctx_reads_request_and_mutates_response():
+    """ResponseCtx exposes the request that was answered (read-only) and the
+    response headers/body (read/write) -- the re-seal seam."""
+    req = tutils.treq(host="api.github.com", method=b"POST", path=b"/token")
+    flow = tflow.tflow(req=req, resp=True)
+    flow.response.headers["X-Token"] = "abc"
+    ctx = schemes.ResponseCtx(flow, {"value": "s"}, {"k": "v"}, "ph")
+
+    assert ctx.request_host == "api.github.com"
+    assert ctx.request_method == "POST"
+    assert ctx.request_path == "/token"
+    assert ctx.header_get("X-Token") == "abc"   # reads the RESPONSE headers
+    assert ctx.secret() == "s"
+    assert ctx.params == {"k": "v"} and ctx.placeholder == "ph"
+
+    ctx.header_set("X-New", "1")
+    assert flow.response.headers["X-New"] == "1"

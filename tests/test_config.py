@@ -260,6 +260,19 @@ def test_body_scheme_needs_no_header():
     assert t.scheme.name == "body"
 
 
+def test_sign_scheme_multi_slot_no_placeholder():
+    """A sigv4 (sign-family) binding validates with two secret slots and no
+    placeholder."""
+    creds = config.load_resolved({"bindings": [{
+        "name": "aws", "hosts": ["sts.amazonaws.com"], "scheme": "sigv4",
+        "secret": {"access_key_id": "AKID", "secret_access_key": "SAK"},
+    }]})
+    [t] = creds.transforms_for("sts.amazonaws.com")
+    assert t.scheme.name == "sigv4"
+    assert t.placeholder is None
+    assert t.secrets == {"access_key_id": "AKID", "secret_access_key": "SAK"}
+
+
 def test_transforms_for_unknown_host_returns_empty():
     creds = config.load_resolved({"bindings": [_entry()]})
     assert creds.transforms_for("not-configured.com") == []

@@ -383,6 +383,51 @@ def test_append_binding_multi_slot_inline_table(xdg, workspaces_dir):
     }
 
 
+def test_append_binding_escapes_special_chars(xdg, workspaces_dir):
+    """A ref/host/env/placeholder with quotes or backslashes round-trips
+    instead of corrupting the TOML."""
+    ws = _write_ws(workspaces_dir, "esc", 'image = "x"\n')
+    from credproxy_cli.core.bindings import Binding, append_binding
+    import tomllib
+
+    nasty = 'op://v/it"em\\x'
+    b = Binding(name="b1", injector="bearer", provider="env",
+                secret=nasty, hosts=('h".io',), placeholder='p"h', env='E"V')
+    append_binding(ws, b)
+    raw = tomllib.loads(ws.config_path.read_text())  # must not raise
+    od = raw["binding"][0]
+    assert od["secret"] == nasty
+    assert od["hosts"] == ['h".io']
+    assert od["placeholder"] == 'p"h'
+    assert od["env"] == 'E"V'
+
+
+def test_append_binding_multi_slot_escapes(xdg, workspaces_dir):
+    ws = _write_ws(workspaces_dir, "escms", 'image = "x"\n')
+    from credproxy_cli.core.bindings import Binding, append_binding
+    import tomllib
+
+    b = Binding(name="aws", injector="sigv4", provider="env",
+                secret={"access_key_id": 'a"b', "secret_access_key": "c\\d"},
+                hosts=("h",), placeholder=None, env=None)
+    append_binding(ws, b)
+    raw = tomllib.loads(ws.config_path.read_text())  # must not raise
+    assert raw["binding"][0]["secret"] == {
+        "access_key_id": 'a"b', "secret_access_key": "c\\d"}
+
+
+def test_test_binding_shared_ref_counted_once(xdg, workspaces_dir):
+    """value_len sums distinct fetched values, so a ref shared by two slots is
+    counted once."""
+    from credproxy_cli.core.bindings import Binding, test_binding
+
+    b = Binding(name="x", injector="sigv4", provider="env",
+                secret={"access_key_id": "SAME", "secret_access_key": "SAME"},
+                hosts=("h",), placeholder=None, env=None)
+    r = test_binding(b, fetch_many=lambda p, refs: {ref: "ABCD" for ref in refs})
+    assert r.ok and r.value_len == 4  # not 8
+
+
 def test_remove_binding_not_found(xdg, workspaces_dir):
     ws = _write_ws(workspaces_dir, "rm_ghost", 'image = "x"\n')
     from credproxy_cli.core.bindings import remove_binding

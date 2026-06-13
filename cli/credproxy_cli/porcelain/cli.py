@@ -309,26 +309,26 @@ def _logs_json(ws: Workspace) -> None:
 
 def _parse_secret_args(values: list[str] | None) -> str | dict[str, str] | None:
     """Turn repeated --secret values into a single bare ref (single-slot) or a
-    slot->ref table (multi-slot). Mixing the two styles, or repeating a bare
-    ref, is an error."""
+    slot->ref table (multi-slot).
+
+    A single --secret is always a bare ref, kept verbatim even if it contains
+    '=' (e.g. a vault path with a query string). Multi-slot requires two or more
+    SLOT=REF flags; each is split on its first '=', so a REF may itself contain
+    '='. This sidesteps the ambiguity of a lone ref that happens to contain
+    '='."""
     if not values:
         return None
-    keyed = ["=" in v for v in values]
-    if all(keyed):
-        out: dict[str, str] = {}
-        for v in values:
-            slot, _, ref = v.partition("=")
-            if not slot or not ref:
-                fail(f"--secret '{v}' must be SLOT=REF")
-            if slot in out:
-                fail(f"--secret slot '{slot}' given more than once")
-            out[slot] = ref
-        return out
-    if any(keyed):
-        fail("mix of bare REF and SLOT=REF in --secret; use one style")
-    if len(values) > 1:
-        fail("multiple bare --secret refs; use SLOT=REF for a multi-slot secret")
-    return values[0]
+    if len(values) == 1:
+        return values[0]
+    out: dict[str, str] = {}
+    for v in values:
+        slot, sep, ref = v.partition("=")
+        if not sep or not slot or not ref:
+            fail(f"--secret '{v}' must be SLOT=REF for a multi-slot secret")
+        if slot in out:
+            fail(f"--secret slot '{slot}' given more than once")
+        out[slot] = ref
+    return out
 
 
 def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
