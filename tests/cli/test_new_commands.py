@@ -61,11 +61,11 @@ def test_adhoc_test_ok(xdg, monkeypatch):
 def test_adhoc_test_with_injector_validates(xdg, monkeypatch):
     monkeypatch.setenv("CP_ADHOC_SECRET", "abc")
     ec, out, err = _run(
-        ["workspace", "binding", "test", "--injector", "github",
+        ["workspace", "binding", "test", "--injector", "bearer",
          "--provider", "env", "--secret", "CP_ADHOC_SECRET"]
     )
     assert ec == 0
-    assert "github-env" in out
+    assert "bearer-env" in out
 
 
 def test_adhoc_test_missing_secret_fails(xdg, monkeypatch):

@@ -6,7 +6,14 @@ from aiohttp import web
 
 import admin
 import bootstrap
-from config import BindingCredentials, InwardBinding, Substitution
+import schemes
+from config import BindingCredentials, InwardBinding, Transform
+
+
+def _xform(placeholder, real, *, header="Authorization", name="b"):
+    """A bearer Transform for tests."""
+    return Transform(name, schemes.SCHEMES["bearer"], {"header": header},
+                     placeholder, {"value": real})
 
 
 @pytest.fixture
@@ -36,9 +43,10 @@ VALID_CONFIG = {
         {
             "name": "github-env",
             "hosts": ["api.github.com"],
-            "header": "Authorization",
+            "scheme": "bearer",
+            "params": {"header": "Authorization"},
             "placeholder": "credproxy_test",
-            "real": "github_pat_real",
+            "secret": {"value": "github_pat_real"},
             "env": "GITHUB_TOKEN",
         }
     ]
@@ -195,8 +203,8 @@ async def test_post_invalid_config_does_not_overwrite(aiohttp_client, app, state
 
 async def test_post_unresolved_secret_rejected(aiohttp_client, app):
     bad = {"bindings": [
-        {"name": "b", "hosts": ["api.github.com"], "header": "Authorization",
-         "placeholder": "ph", "real": "${secret:GITHUB_PAT}"}
+        {"name": "b", "hosts": ["api.github.com"], "scheme": "bearer",
+         "placeholder": "ph", "secret": {"value": "${secret:GITHUB_PAT}"}}
     ]}
     client = await aiohttp_client(app)
     resp = await client.post(
@@ -320,9 +328,10 @@ async def test_setup_static_fields(aiohttp_client, app):
 async def test_setup_reflects_state(aiohttp_client, app, state):
     """After a config push, /setup returns the inward bindings shape."""
     state.creds = BindingCredentials(
-        {"api.github.com": [Substitution("Authorization", "ph", "real")]},
+        {"api.github.com": [_xform("ph", "real")]},
         [InwardBinding(name="gh", placeholder="ph", env="GH_TOKEN",
-                       header="Authorization", hosts=["api.github.com"])],
+                       scheme="bearer", params={"header": "Authorization"},
+                       hosts=["api.github.com"])],
     )
     client = await aiohttp_client(app)
     resp = await client.get("/setup")
@@ -335,7 +344,8 @@ async def test_setup_reflects_state(aiohttp_client, app, state):
     assert b["name"] == "gh"
     assert b["placeholder"] == "ph"
     assert b["env"] == "GH_TOKEN"
-    assert b["header"] == "Authorization"
+    assert b["scheme"] == "bearer"
+    assert b["params"] == {"header": "Authorization"}
     assert b["hosts"] == ["api.github.com"]
 
 
@@ -361,9 +371,10 @@ async def test_setup_workspace_name_absent_is_null(aiohttp_client, app, monkeypa
 async def test_setup_least_disclosure(aiohttp_client, app, state):
     """Inward API: real credential values must NOT appear in /setup response."""
     state.creds = BindingCredentials(
-        {"api.github.com": [Substitution("Authorization", "ph_sentinel", "super_secret_real")]},
+        {"api.github.com": [_xform("ph_sentinel", "super_secret_real")]},
         [InwardBinding(name="gh", placeholder="ph_sentinel", env=None,
-                       header="Authorization", hosts=["api.github.com"])],
+                       scheme="bearer", params={"header": "Authorization"},
+                       hosts=["api.github.com"])],
     )
     client = await aiohttp_client(app)
     resp = await client.get("/setup")
@@ -377,14 +388,16 @@ def test_workspace_bindings_function():
     """Unit test for the bootstrap.workspace_bindings free function."""
     creds = BindingCredentials(
         {
-            "api.github.com": [Substitution("Authorization", "ph1", "r1")],
-            "api.example.com": [Substitution("X-API-Key", "ph2", "r2")],
+            "api.github.com": [_xform("ph1", "r1")],
+            "api.example.com": [_xform("ph2", "r2", header="X-API-Key")],
         },
         [
             InwardBinding(name="gh", placeholder="ph1", env="GH_TOKEN",
-                          header="Authorization", hosts=["api.github.com"]),
+                          scheme="bearer", params={"header": "Authorization"},
+                          hosts=["api.github.com"]),
             InwardBinding(name="ex", placeholder="ph2", env=None,
-                          header="X-API-Key", hosts=["api.example.com"]),
+                          scheme="bearer", params={"header": "X-API-Key"},
+                          hosts=["api.example.com"]),
         ],
     )
     result = bootstrap.workspace_bindings(creds)
@@ -392,9 +405,11 @@ def test_workspace_bindings_function():
     by_name = {b["name"]: b for b in result}
     assert by_name["gh"]["placeholder"] == "ph1"
     assert by_name["gh"]["env"] == "GH_TOKEN"
-    assert by_name["gh"]["header"] == "Authorization"
+    assert by_name["gh"]["scheme"] == "bearer"
+    assert by_name["gh"]["params"] == {"header": "Authorization"}
     assert by_name["gh"]["hosts"] == ["api.github.com"]
     assert "real" not in by_name["gh"]
+    assert "secret" not in by_name["gh"]
     assert by_name["ex"]["env"] is None
 
 

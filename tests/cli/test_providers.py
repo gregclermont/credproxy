@@ -113,13 +113,45 @@ def test_fetch_happy_path(xdg):
         python3 -c '
         import json,sys
         req=json.load(sys.stdin)
-        json.dump({"value": "hello_secret"}, sys.stdout)
+        json.dump({"values": {r: "hello_secret" for r in req["secrets"]}}, sys.stdout)
         '
     """)
 
     from credproxy_cli.core.providers import fetch
     value = fetch("ok_prov", "anything")
     assert value == "hello_secret"
+
+
+def test_fetch_many_batch(xdg):
+    """fetch_many resolves every requested ref in one invocation."""
+    d = _user_providers(xdg)
+    _make_provider(d, "batch_prov", """\
+        #!/bin/sh
+        python3 -c '
+        import json,sys
+        req=json.load(sys.stdin)
+        json.dump({"values": {r: r.lower() for r in req["secrets"]}}, sys.stdout)
+        '
+    """)
+
+    from credproxy_cli.core.providers import fetch_many
+    out = fetch_many("batch_prov", ["AAA", "BBB"])
+    assert out == {"AAA": "aaa", "BBB": "bbb"}
+
+
+def test_fetch_many_missing_ref(xdg):
+    """A response missing a requested ref is a protocol error."""
+    d = _user_providers(xdg)
+    _make_provider(d, "partial_prov", """\
+        #!/bin/sh
+        echo '{"values": {"AAA": "x"}}'
+    """)
+
+    from credproxy_cli.core.errors import ProviderError
+    from credproxy_cli.core.providers import fetch_many
+
+    with pytest.raises(ProviderError, match="missing ref 'BBB'"):
+        fetch_many("partial_prov", ["AAA", "BBB"])
 
 
 def test_fetch_exit2_not_found(xdg):
@@ -167,8 +199,8 @@ def test_fetch_garbage_stdout(xdg):
         fetch("garbage_prov", "mysecret")
 
 
-def test_fetch_missing_value_field(xdg):
-    """JSON without a `value` field -> ProviderError."""
+def test_fetch_missing_values_object(xdg):
+    """JSON without a `values` object -> ProviderError."""
     d = _user_providers(xdg)
     _make_provider(d, "noval_prov", """\
         #!/bin/sh
@@ -178,22 +210,22 @@ def test_fetch_missing_value_field(xdg):
     from credproxy_cli.core.errors import ProviderError
     from credproxy_cli.core.providers import fetch
 
-    with pytest.raises(ProviderError, match="missing a `value` field"):
+    with pytest.raises(ProviderError, match="missing a `values` object"):
         fetch("noval_prov", "mysecret")
 
 
 def test_fetch_value_not_string(xdg):
-    """JSON `value` not a string -> ProviderError."""
+    """A `values` entry that is not a string -> ProviderError."""
     d = _user_providers(xdg)
     _make_provider(d, "badval_prov", """\
         #!/bin/sh
-        echo '{"value": 42}'
+        echo '{"values": {"mysecret": 42}}'
     """)
 
     from credproxy_cli.core.errors import ProviderError
     from credproxy_cli.core.providers import fetch
 
-    with pytest.raises(ProviderError, match="`value`.*must be a string"):
+    with pytest.raises(ProviderError, match="must be a string"):
         fetch("badval_prov", "mysecret")
 
 

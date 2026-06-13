@@ -1,5 +1,5 @@
-"""Tests for core/injectors.py: schema validation, placeholder generation,
-user-dir shadowing bundled."""
+"""Tests for core/injectors.py: scheme-based schema validation, placeholder
+generation, user-dir shadowing bundled."""
 from __future__ import annotations
 
 import pytest
@@ -8,27 +8,32 @@ import pytest
 # ---- bundled injectors -------------------------------------------------------
 
 
-def test_find_bundled_github(xdg):
-    from credproxy_cli.core.injectors import find_injector
-
-    inj = find_injector("github")
-    assert inj.name == "github"
-    assert inj.header == "Authorization"
-    assert inj.format == "Bearer {value}"
-    assert inj.env == "GITHUB_TOKEN"
-    assert inj.placeholder.prefix == "ghp_"
-    assert inj.placeholder.length == 40
-    assert inj.placeholder.charset == "alnumeric"
-    assert inj.source == "bundled"
-
-
 def test_find_bundled_bearer(xdg):
     from credproxy_cli.core.injectors import find_injector
 
     inj = find_injector("bearer")
     assert inj.name == "bearer"
-    assert inj.header == "Authorization"
+    assert inj.scheme == "bearer"
+    assert inj.params == {"header": "Authorization"}  # default merged in
     assert inj.env is None
+    assert inj.source == "bundled"
+
+
+def test_find_bundled_basic(xdg):
+    from credproxy_cli.core.injectors import find_injector
+
+    inj = find_injector("basic")
+    assert inj.scheme == "basic"
+    assert inj.params == {"header": "Authorization"}
+    assert inj.source == "bundled"
+
+
+def test_find_bundled_body(xdg):
+    from credproxy_cli.core.injectors import find_injector
+
+    inj = find_injector("body")
+    assert inj.scheme == "body"
+    assert inj.params == {}
     assert inj.source == "bundled"
 
 
@@ -49,44 +54,56 @@ def test_user_injector_shadows_bundled(xdg, tmp_path, monkeypatch):
 
     user_dir = injectors_config_dir()
     user_dir.mkdir(parents=True, exist_ok=True)
-    # Override github with a custom header
-    (user_dir / "github.toml").write_text(
-        'header = "X-Custom-Auth"\nformat = "{value}"\n'
+    (user_dir / "bearer.toml").write_text(
+        'scheme = "bearer"\n[params]\nheader = "X-Custom-Auth"\n'
     )
 
     from credproxy_cli.core.injectors import find_injector
-    inj = find_injector("github")
-    assert inj.header == "X-Custom-Auth"
+    inj = find_injector("bearer")
+    assert inj.params["header"] == "X-Custom-Auth"
     assert inj.source == "user"
 
 
 # ---- schema validation -------------------------------------------------------
 
 
-def test_injector_missing_header(xdg):
+def test_injector_missing_scheme(xdg):
     from credproxy_cli.core.errors import InjectorError
     from credproxy_cli.core.injectors import find_injector
     from credproxy_cli.core.paths import injectors_config_dir
 
     user_dir = injectors_config_dir()
     user_dir.mkdir(parents=True, exist_ok=True)
-    (user_dir / "badone.toml").write_text('format = "{value}"\n')
+    (user_dir / "badone.toml").write_text('env = "X"\n')
 
-    with pytest.raises(InjectorError, match="`header` is required"):
+    with pytest.raises(InjectorError, match="`scheme` is required"):
         find_injector("badone")
 
 
-def test_injector_format_missing_value_placeholder(xdg):
+def test_injector_unknown_scheme(xdg):
     from credproxy_cli.core.errors import InjectorError
     from credproxy_cli.core.injectors import find_injector
     from credproxy_cli.core.paths import injectors_config_dir
 
     user_dir = injectors_config_dir()
     user_dir.mkdir(parents=True, exist_ok=True)
-    (user_dir / "badfmt.toml").write_text('header = "Auth"\nformat = "no_placeholder_token"\n')
+    (user_dir / "badscheme.toml").write_text('scheme = "telepathy"\n')
 
-    with pytest.raises(InjectorError, match="format"):
-        find_injector("badfmt")
+    with pytest.raises(InjectorError, match="unknown scheme"):
+        find_injector("badscheme")
+
+
+def test_injector_params_not_table(xdg):
+    from credproxy_cli.core.errors import InjectorError
+    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.paths import injectors_config_dir
+
+    user_dir = injectors_config_dir()
+    user_dir.mkdir(parents=True, exist_ok=True)
+    (user_dir / "badparams.toml").write_text('scheme = "bearer"\nparams = "nope"\n')
+
+    with pytest.raises(InjectorError, match="\\[params\\] must be a table"):
+        find_injector("badparams")
 
 
 def test_injector_placeholder_unknown_charset(xdg):
@@ -97,7 +114,7 @@ def test_injector_placeholder_unknown_charset(xdg):
     user_dir = injectors_config_dir()
     user_dir.mkdir(parents=True, exist_ok=True)
     (user_dir / "badcs.toml").write_text(
-        'header = "Auth"\nformat = "{value}"\n'
+        'scheme = "bearer"\n'
         '[placeholder]\nprefix = "x_"\nlength = 20\ncharset = "emoji"\n'
     )
 
@@ -113,7 +130,7 @@ def test_injector_placeholder_length_too_short(xdg):
     user_dir = injectors_config_dir()
     user_dir.mkdir(parents=True, exist_ok=True)
     (user_dir / "shorty.toml").write_text(
-        'header = "Auth"\nformat = "{value}"\n'
+        'scheme = "bearer"\n'
         '[placeholder]\nprefix = "toolongprefix_"\nlength = 5\n'
     )
 
@@ -148,7 +165,7 @@ def test_placeholder_generate_randomness():
 
     ph = Placeholder(prefix="credproxy_", length=40, charset="alnumeric")
     values = {ph.generate() for _ in range(10)}
-    assert len(values) > 1  # extremely unlikely to fail
+    assert len(values) > 1
 
 
 def test_placeholder_generate_base64url_charset():
@@ -168,8 +185,9 @@ def test_list_injectors_includes_bundled(xdg):
     from credproxy_cli.core.injectors import list_injectors
 
     names = [i.name for i in list_injectors()]
-    assert "github" in names
     assert "bearer" in names
+    assert "basic" in names
+    assert "body" in names
 
 
 def test_list_injectors_user_shadows(xdg):
@@ -178,9 +196,8 @@ def test_list_injectors_user_shadows(xdg):
 
     user_dir = injectors_config_dir()
     user_dir.mkdir(parents=True, exist_ok=True)
-    (user_dir / "github.toml").write_text('header = "X-User"\nformat = "{value}"\n')
+    (user_dir / "bearer.toml").write_text('scheme = "bearer"\n[params]\nheader = "X-User"\n')
 
     injectors = {i.name: i for i in list_injectors()}
-    assert injectors["github"].source == "user"
-    # bundled bearer still present
-    assert injectors["bearer"].source == "bundled"
+    assert injectors["bearer"].source == "user"
+    assert injectors["basic"].source == "bundled"

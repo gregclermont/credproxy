@@ -1,22 +1,32 @@
-"""Tests for proxy/addon.py — HostnameLogger intercept decision and substitution."""
+"""Tests for proxy/addon.py — HostnameLogger intercept decision and scheme
+injection (design-v3 scheme-aware transforms)."""
+import base64
 from types import SimpleNamespace
 
 from mitmproxy.test import tflow, tutils
 
 import addon
-from config import Substitution
+import schemes
+from config import Transform
+
+
+def _t(scheme, placeholder, real, *, header="Authorization", name="b"):
+    """Build a Transform for `scheme` with a single `value` secret slot."""
+    params = {} if scheme == "body" else {"header": header}
+    return Transform(name, schemes.SCHEMES[scheme], params, placeholder,
+                     {"value": real})
 
 
 class FakeCreds:
-    """Hand-rolled Credentials for unit tests; bypasses YAML."""
+    """Hand-rolled Credentials for unit tests."""
 
-    def __init__(self, hosts: dict[str, list[Substitution]]):
+    def __init__(self, hosts: dict[str, list[Transform]]):
         self._hosts = hosts
 
     def intercept_hosts(self) -> set[str]:
         return set(self._hosts)
 
-    def substitutions_for(self, host: str) -> list[Substitution]:
+    def transforms_for(self, host: str) -> list[Transform]:
         return list(self._hosts.get(host, []))
 
     def inward_bindings(self) -> list:
@@ -30,11 +40,6 @@ def make_state(hosts):
 
 
 def make_clienthello(sni):
-    """Minimal mitmproxy.tls.ClientHelloData stand-in.
-
-    The addon only reads .client_hello.sni and writes .ignore_connection,
-    so a SimpleNamespace is enough.
-    """
     return SimpleNamespace(
         client_hello=SimpleNamespace(sni=sni),
         ignore_connection=False,
@@ -43,7 +48,6 @@ def make_clienthello(sni):
 
 def make_flow(host="api.github.com", path="/user", headers=None):
     req = tutils.treq(host=host, path=path.encode())
-    # tutils.treq sets a default header; clear it for predictable tests.
     req.headers.clear()
     for k, v in (headers or {}).items():
         req.headers[k] = v
@@ -73,11 +77,11 @@ def test_clienthello_no_sni_passthrough():
     assert data.ignore_connection is True
 
 
-# ---- request: substitution behavior ----
+# ---- request: bearer substitution ----
 
 def test_request_substitutes_placeholder():
     log = addon.HostnameLogger(make_state({
-        "api.github.com": [Substitution("Authorization", "PH", "REAL")]
+        "api.github.com": [_t("bearer", "PH", "REAL")]
     }))
     flow = make_flow(headers={"Authorization": "Bearer PH"})
     log.request(flow)
@@ -86,7 +90,7 @@ def test_request_substitutes_placeholder():
 
 def test_request_no_substitution_when_placeholder_absent_in_value():
     log = addon.HostnameLogger(make_state({
-        "api.github.com": [Substitution("Authorization", "PH", "REAL")]
+        "api.github.com": [_t("bearer", "PH", "REAL")]
     }))
     flow = make_flow(headers={"Authorization": "Bearer not_the_placeholder"})
     log.request(flow)
@@ -95,7 +99,7 @@ def test_request_no_substitution_when_placeholder_absent_in_value():
 
 def test_request_no_substitution_when_header_absent():
     log = addon.HostnameLogger(make_state({
-        "api.github.com": [Substitution("Authorization", "PH", "REAL")]
+        "api.github.com": [_t("bearer", "PH", "REAL")]
     }))
     flow = make_flow(headers={})
     log.request(flow)
@@ -105,8 +109,8 @@ def test_request_no_substitution_when_header_absent():
 def test_request_multiple_headers_substituted():
     log = addon.HostnameLogger(make_state({
         "api.github.com": [
-            Substitution("Authorization", "PH1", "REAL1"),
-            Substitution("X-API-Key", "PH2", "REAL2"),
+            _t("bearer", "PH1", "REAL1", header="Authorization", name="b1"),
+            _t("bearer", "PH2", "REAL2", header="X-API-Key", name="b2"),
         ]
     }))
     flow = make_flow(headers={"Authorization": "PH1", "X-API-Key": "PH2"})
@@ -115,24 +119,10 @@ def test_request_multiple_headers_substituted():
     assert flow.request.headers["X-API-Key"] == "REAL2"
 
 
-def test_request_only_one_of_multiple_headers_present():
-    """If only one configured header is present, only that one is substituted."""
-    log = addon.HostnameLogger(make_state({
-        "api.github.com": [
-            Substitution("Authorization", "PH1", "REAL1"),
-            Substitution("X-API-Key", "PH2", "REAL2"),
-        ]
-    }))
-    flow = make_flow(headers={"Authorization": "PH1"})
-    log.request(flow)
-    assert flow.request.headers["Authorization"] == "REAL1"
-    assert "X-API-Key" not in flow.request.headers
-
-
 def test_request_placeholder_appears_twice_in_one_value():
     """str.replace replaces all occurrences."""
     log = addon.HostnameLogger(make_state({
-        "api.github.com": [Substitution("X-Weird", "PH", "REAL")]
+        "api.github.com": [_t("bearer", "PH", "REAL", header="X-Weird")]
     }))
     flow = make_flow(headers={"X-Weird": "PH and PH again"})
     log.request(flow)
@@ -140,10 +130,8 @@ def test_request_placeholder_appears_twice_in_one_value():
 
 
 def test_request_non_intercepted_host_no_change():
-    """request hook on a non-intercepted host (shouldn't fire in prod due
-    to ignore_connection, but the addon must still no-op safely)."""
     log = addon.HostnameLogger(make_state({
-        "api.github.com": [Substitution("Authorization", "PH", "REAL")]
+        "api.github.com": [_t("bearer", "PH", "REAL")]
     }))
     flow = make_flow(host="example.com", headers={"Authorization": "Bearer PH"})
     log.request(flow)
@@ -152,13 +140,72 @@ def test_request_non_intercepted_host_no_change():
 
 def test_state_creds_swap_takes_effect_on_next_call():
     """In-process reload: mutating state.creds is visible to the next request."""
-    state = make_state({"api.github.com": [Substitution("Authorization", "OLD", "OLDREAL")]})
+    state = make_state({"api.github.com": [_t("bearer", "OLD", "OLDREAL")]})
     log = addon.HostnameLogger(state)
     flow = make_flow(headers={"Authorization": "OLD"})
     log.request(flow)
     assert flow.request.headers["Authorization"] == "OLDREAL"
 
-    state.creds = FakeCreds({"api.github.com": [Substitution("Authorization", "NEW", "NEWREAL")]})
+    state.creds = FakeCreds({"api.github.com": [_t("bearer", "NEW", "NEWREAL")]})
     flow2 = make_flow(headers={"Authorization": "NEW"})
     log.request(flow2)
     assert flow2.request.headers["Authorization"] == "NEWREAL"
+
+
+# ---- request: basic decode-and-swap ----
+
+def _basic(user, secret):
+    return "Basic " + base64.b64encode(f"{user}:{secret}".encode()).decode()
+
+
+def test_basic_swaps_password_component():
+    log = addon.HostnameLogger(make_state({
+        "github.com": [_t("basic", "PH", "REAL")]
+    }))
+    flow = make_flow(host="github.com", headers={"Authorization": _basic("alice", "PH")})
+    log.request(flow)
+    assert flow.request.headers["Authorization"] == _basic("alice", "REAL")
+
+
+def test_basic_swaps_username_component():
+    """A token in the username position (dummy password) is also swapped."""
+    log = addon.HostnameLogger(make_state({
+        "github.com": [_t("basic", "PH", "REAL")]
+    }))
+    flow = make_flow(host="github.com", headers={"Authorization": _basic("PH", "x-oauth-basic")})
+    log.request(flow)
+    assert flow.request.headers["Authorization"] == _basic("REAL", "x-oauth-basic")
+
+
+def test_basic_no_swap_when_no_match():
+    log = addon.HostnameLogger(make_state({
+        "github.com": [_t("basic", "PH", "REAL")]
+    }))
+    orig = _basic("alice", "other")
+    flow = make_flow(host="github.com", headers={"Authorization": orig})
+    log.request(flow)
+    assert flow.request.headers["Authorization"] == orig
+
+
+# ---- request: body substitution ----
+
+def test_body_substitutes_placeholder():
+    log = addon.HostnameLogger(make_state({
+        "login.example.com": [_t("body", "PH", "REAL")]
+    }))
+    flow = make_flow(host="login.example.com")
+    flow.request.text = "grant_type=client_credentials&client_secret=PH"
+    log.request(flow)
+    assert flow.request.text == "grant_type=client_credentials&client_secret=REAL"
+
+
+# ---- response: no-op seam ----
+
+def test_response_hook_is_noop_for_substitute_schemes():
+    """The response hook is plumbed but does nothing for substitute schemes."""
+    log = addon.HostnameLogger(make_state({
+        "api.github.com": [_t("bearer", "PH", "REAL")]
+    }))
+    flow = make_flow(headers={"Authorization": "Bearer PH"})
+    # Should not raise and should not touch the (unset) response.
+    log.response(flow)
