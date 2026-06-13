@@ -102,6 +102,25 @@ The `/setup` response also includes a top-level `workspace` field — the
 workspace's own name (or `null` if unknown) — handy for self-identification
 such as a shell prompt: `WS=$(curl -s http://proxy.local/setup | jq -r .workspace)`.
 
+## SELinux (Fedora / RHEL hosts)
+
+On a host with SELinux enforcing, host bind mounts carry the host's label
+(e.g. `user_home_t`), which a confined container cannot read. credproxy
+handles this so mounts work out of the box, splitting by trust:
+
+- **Proxy container** stays SELinux-confined (it is privileged and holds the
+  real secrets). Its own bind mounts are relabeled: the bearer token with
+  `:Z` (private) and, in dev, the bind-mounted source with `:z` (shared).
+- **Workspace container** runs with `--security-opt label=disable` (as
+  distrobox/toolbx do). This lets your bind-mounted project directories be
+  read **without relabeling them** — credproxy never mutates the SELinux
+  context of your own directories. The tradeoff is that the workspace
+  container is not SELinux-confined; acceptable since it runs your own
+  workload and the privileged proxy stays confined.
+
+All of this is a no-op on hosts without SELinux (Docker/podman on
+non-SELinux systems accept the flags and ignore them).
+
 ## Egress shape
 
 What happens to packets the workspace originates:

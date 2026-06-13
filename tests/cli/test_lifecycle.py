@@ -50,6 +50,49 @@ def _make_binding_summary(name="b", injector="github", provider="env",
     )
 
 
+# ---- SELinux mount flags (cross-runtime: no-op without SELinux) --------------
+
+
+def _capture_docker_args(monkeypatch):
+    """Stub lifecycle.docker.docker to record the args of each run."""
+    calls = []
+    monkeypatch.setattr("credproxy_cli.core.lifecycle.docker.docker",
+                        lambda args, **kw: calls.append(args))
+    return calls
+
+
+def test_proxy_relabels_its_own_mounts(xdg, ws_factory, monkeypatch):
+    """The proxy stays SELinux-confined: its token mount is relabeled private
+    (:Z) so it can read it under enforcing SELinux, converted from --mount to
+    -v (Docker rejects relabel= on --mount). It must NOT disable labeling."""
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.imageenv import ImageEnv
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    meta = ImageEnv(http_port=39998, tmpfs="/run/secrets",
+                    token="/run/secrets-ro/auth.token", source="/opt/proxy")
+    lifecycle.create_proxy(ws, meta)
+    joined = " ".join(calls[-1])
+    assert f"{ws.token_path}:/run/secrets-ro/auth.token:ro,Z" in joined
+    assert "--mount" not in calls[-1]       # token converted from --mount to -v
+    assert "label=disable" not in joined    # proxy stays confined
+
+
+def test_workspace_disables_selinux_labeling(xdg, ws_factory, monkeypatch):
+    """The workspace runs with label=disable so user bind mounts work without
+    relabeling (mutating) the user's own directories."""
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": []}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    args = calls[-1]
+    assert "--security-opt" in args
+    assert args[args.index("--security-opt") + 1] == "label=disable"
+
+
 # ---- _compute_drift: no applied record = in sync ----------------------------
 
 

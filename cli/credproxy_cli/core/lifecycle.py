@@ -137,8 +137,14 @@ def create_proxy(ws: Workspace, meta: ImageEnv) -> None:
         # the tmpfs dir's default mode is not writable by it, and Docker
         # mounts it differently on `docker run` vs. a later `docker start`.
         "--tmpfs", f"{meta.tmpfs}:size=64k,mode=1777",
-        "--mount",
-        f"type=bind,source={ws.token_path},target={meta.token},readonly",
+        # Bind the host token in read-only. The `:Z` SELinux relabel (private)
+        # is required on enforcing-SELinux hosts (Fedora/RHEL) so the proxy can
+        # read it -- without it the file keeps its host label and the container
+        # is denied. `:Z` is a no-op on non-SELinux hosts and accepted by both
+        # Docker and Podman; `-v` (not `--mount`) is used because Docker rejects
+        # `relabel=` on `--mount`. The proxy stays SELinux-confined (it is the
+        # privileged, secret-holding component); only the workspace disables it.
+        "-v", f"{ws.token_path}:{meta.token}:ro,Z",
         # Ephemeral host port: the runtime assigns a free port per proxy
         # container so multiple workspaces run simultaneously without port
         # conflicts. The empty host-port spelling (`ip::container`) means
@@ -147,9 +153,10 @@ def create_proxy(ws: Workspace, meta: ImageEnv) -> None:
         "-p", f"127.0.0.1::{meta.http_port}",
     ]
     # Dev convenience: bind-mount the proxy source so `dev reload` picks
-    # up edits. Skipped if run outside the repo checkout.
+    # up edits. Skipped if run outside the repo checkout. `:z` (shared SELinux
+    # relabel) so the proxy can read it under enforcing SELinux; no-op without.
     if PROXY_DIR.is_dir():
-        args += ["-v", f"{PROXY_DIR}:{meta.source}"]
+        args += ["-v", f"{PROXY_DIR}:{meta.source}:z"]
     args.append(IMAGE_TAG)
     docker.docker(args)
 
@@ -163,6 +170,15 @@ def create_ws_container(
         "--label", "credproxy.role=workspace",
         "--label", f"credproxy.workspace={ws.name}",
         "--label", f"credproxy.spec={spec_hash}",
+        # Run the workspace with SELinux labeling disabled (like distrobox /
+        # toolbx). On enforcing-SELinux hosts this lets the user's bind mounts
+        # be read WITHOUT relabeling -- i.e. without mutating the SELinux
+        # context of the user's own project directories. It is a no-op on
+        # non-SELinux hosts. The tradeoff is that the workspace container loses
+        # SELinux confinement; acceptable because the workspace runs the user's
+        # own workload (credproxy is a credential boundary, not a hardened
+        # jail) and the privileged proxy stays confined.
+        "--security-opt", "label=disable",
         # Share the proxy's netns so all egress is captured.
         "--network", f"container:{ws.proxy_container}",
         # Persistent home volume; seeded from the image's home on first run.
