@@ -3,8 +3,8 @@
 The **workspace** is whatever container the user runs to do their work
 behind credproxy — an LLM agent, a CI runner, a dev shell, a batch job.
 It joins the **proxy** container's network namespace via
-`--network=container:credproxy`. The proxy owns the netns; the workspace
-shares it.
+`--network=container:credproxy-proxy-<name>`. The proxy owns the netns;
+the workspace shares it.
 
 The workspace image itself can be anything. No special build, no
 `NET_ADMIN`, no installed CA, no environment variables. The constraints
@@ -72,6 +72,31 @@ non-loopback interface; in practice this never matters.
 does not have; they return 401 to the workspace. Bootstrap routes
 (`/health`, `/ca.crt`, `/bootstrap.sh`, `/env.sh`, `/setup`,
 `/llms.txt`) are open by design.
+
+## Bootstrap
+
+Run once (as root) to install the proxy CA and write env vars:
+
+```sh
+curl -sSL http://proxy.local/bootstrap.sh | sh
+```
+
+This fetches the CA, installs it system-wide (if `update-ca-certificates`
+is available), and writes `/etc/profile.d/credproxy.sh` with the env
+vars that tools like Python requests (certifi), Node, Cargo, and AWS SDKs
+need to trust the CA.
+
+After bootstrap, fetch the credential bindings to wire up your tools:
+
+```sh
+curl -s http://proxy.local/setup | jq .bindings
+```
+
+Each binding entry exposes: `name`, `placeholder` (the inert sentinel to
+use as the credential value), `env` (suggested env var, may be null),
+`header` (the HTTP header the proxy watches), and `hosts` (the hostnames
+for which injection is active). The real credential is never exposed
+here. Use `http://169.254.1.1` directly if `proxy.local` does not resolve.
 
 ## Egress shape
 

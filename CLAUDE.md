@@ -4,28 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-The product (codename "credproxy") is a transparent egress proxy for workspace containers — LLM-agent sandboxes, CI runners, dev shells, batch jobs. `design-v0.md` is the *initial* design sketch and `design-v1.md` is the design for the current instance-model CLI — both useful background, but the implementation has diverged in places and that's fine; learn-by-building is expected. CLAUDE.md (this file) and the code are the living source of truth. The repo holds the proxy core under `proxy/`, the host CLI at `bin/credproxy`, tests under `tests/`, and `docs/workspace.md`.
-
-When implementation continues, the v1 deliverables enumerated in `design-v0.md` ("V1 deliverables" section) are a reasonable starting scope, but treat the list as a starting point rather than a contract. Surface tradeoffs when scope shifts.
+The product (codename "credproxy") is a transparent egress proxy for workspace containers — LLM-agent sandboxes, CI runners, dev shells, batch jobs. `design-v0.md` is the initial design sketch, `design-v1.md` is the previous instance-model CLI design, and `design-v2.md` is the current design (implemented). All three are useful background; divergence from earlier docs is expected (learn-by-building). CLAUDE.md (this file) and the code are the living source of truth. The repo holds the proxy core under `proxy/`, the host CLI at `bin/credproxy` and `bin/credp`, the CLI package under `cli/credproxy_cli/`, tests under `tests/`, and `docs/`.
 
 ## Big-picture architecture
 
 The product is **two containers that must stay separated**:
 
-1. **Proxy container** (Linux, requires `NET_ADMIN`): owns the netns, installs iptables rules, runs two listeners — mitmproxy on `127.0.0.1:39999` (transparent intercept) and a single aiohttp HTTP API on `0.0.0.0:39998` that serves both workspace-facing bootstrap routes and host-facing admin routes. iptables redirects sentinel-IP `:80` to the HTTP listener and everything-else-TCP to mitmproxy. The HTTP listener is port-published to the host as `127.0.0.1:39998`; workspace reaches it through the sentinel redirect or directly via `127.0.0.1:39998` in the shared netns.
-2. **Host CLI** (`bin/credproxy`, Python; Go later): an instance manager. A credproxy *instance* is a named, persistent pair of containers — a proxy container and a workspace container sharing one netns — created once, then started/stopped explicitly; one instance runs at a time. All instance state lives on the host under `~/.credproxy/<name>/`. User commands: `create`, `start`, `stop`, `shell`, `list`, `delete`, `config`, `logs`. Harness commands for hacking on credproxy itself live under `credproxy dev` (`build`, `test`, `reload`) and need the repo checkout. Mount-target paths and the published HTTP port are sourced from the proxy image's `ENV` declarations (read via `docker inspect`'s `Config.Env`), so the image is the single source of truth for its own API; the CLI hardcodes only its own conventions (image tag, instance-home location, container/volume naming, default workspace image). See `design-v1.md` for the instance model.
+1. **Proxy container** (Linux, requires `NET_ADMIN`): owns the netns, installs iptables rules, runs two listeners — mitmproxy on `127.0.0.1:39999` (transparent intercept) and a single aiohttp HTTP API on `0.0.0.0:39998` that serves both workspace-facing bootstrap routes and host-facing admin routes. iptables redirects sentinel-IP `:80` to the HTTP listener and everything-else-TCP to mitmproxy. The HTTP listener is port-published to the host as `127.0.0.1:<ephemeral port>` (Docker assigns a free port per proxy container so multiple workspaces run simultaneously without conflict); workspace reaches it through the sentinel redirect or directly via `127.0.0.1:39998` in the shared netns.
+2. **Host CLI** (`bin/credproxy`, Python; Go later): a workspace manager. A credproxy *workspace* is a named, persistent pair of containers — a proxy container and a workspace container sharing one netns — created once, then started/stopped explicitly; multiple workspaces run concurrently. Config is TOML, one file per workspace at `$XDG_CONFIG_HOME/credproxy/workspaces/<name>.toml`. State lives at `$XDG_STATE_HOME/credproxy/workspaces/<name>/`. The host port is ephemeral and resolved at call time via `docker port`; it is never persisted. Mount-target paths are sourced from the proxy image's `ENV` declarations (read via `docker inspect`'s `Config.Env`), so the image is the single source of truth for its own API; the CLI hardcodes only its own conventions (image tag, workspace storage layout, container/volume naming, default workspace image).
 
-The workspace container is **the user's** image — never modified, never granted privilege. This "bring your own image" constraint is load-bearing for the whole design. See `docs/workspace.md` for the constraints joining the proxy's netns imposes.
+The workspace container is **the user's** image — never modified, never granted privilege. This "bring your own image" constraint is load-bearing. See `docs/workspace.md` for the constraints joining the proxy's netns imposes.
 
 Traffic flow: workspace egress → iptables OUTPUT in shared netns → REDIRECT to mitmproxy (or to the HTTP API for sentinel:80) → SNI peek → either substitute-placeholder-and-forward (terminate TLS) or passthrough (`client_hello.ignore_connection = True`).
 
-**Configuration flow**: each instance has its own bearer token at `~/.credproxy/<name>/auth.token` (mode 0644), generated by `credproxy create`/`start` if absent and bind-mounted read-only into that instance's proxy at `/run/secrets-ro/auth.token`. The python process reads it fresh on every `/admin/config` request — no staging copy, no in-memory snapshot — so rotating the host file takes effect on the next request without a proxy restart. Config lives on tmpfs at `/run/secrets/config.json`, written by `POST /admin/config`. Lifecycle: the token is host-owned and survives everything; the tmpfs config does **not** survive a `docker stop`/`start`, so `credproxy start` always re-pushes the `hosts:` section of `~/.credproxy/<name>/config.yaml` once the proxy is healthy. `credproxy dev reload` (SIGHUP) re-execs python in place and the tmpfs survives that, so pushed config persists across a reload.
+**Configuration flow**: each workspace has its own bearer token at `$XDG_STATE_HOME/credproxy/workspaces/<name>/auth.token` (mode 0644), generated by `credproxy workspace create` or `start` if absent and bind-mounted read-only into that workspace's proxy at `/run/secrets-ro/auth.token`. The proxy reads it fresh on every `/admin/config` request — no staging copy, no in-memory snapshot — so rotating the host file takes effect on the next request without a proxy restart. Config lives on tmpfs at `/run/secrets/config.json`, written by `POST /admin/config`. Lifecycle: the token is host-owned and survives everything; the tmpfs config does **not** survive a `docker stop`/`start`, so `credproxy workspace NAME start` always re-materializes and re-pushes bindings once the proxy is healthy. `credproxy dev reload` (SIGHUP) re-execs python in place and the tmpfs survives that, so pushed config persists across a reload.
 
-## Threat model (v1)
+**Bindings**: a *binding* ties an injector (how a credential is shaped into a request) to a provider (where the value comes from), scoped to one or more hosts. The host CLI resolves each binding's secret from its provider at `start`/`apply`/`binding test` time and pushes the resolved wire config (`{"bindings": [{name, hosts, header, placeholder, real, env}]}`) to `/admin/config`. The real secret never enters the workspace. The inward `/setup` endpoint exposes only least-disclosure fields (name, placeholder, env, header, hosts — never real/provider/secret-id) so the workspace can self-configure.
 
-- **Workspace container**: cannot read the host filesystem, so cannot read `~/.credproxy/<name>/auth.token`. Can hit `/admin/*` endpoints over the shared netns and gets 401 without the token. No window in which `/admin/config` is unauthenticated.
+**Placeholder materialization**: missing `name` and `placeholder` fields are generated (auto-name rule: `<injector>-<provider>[-N]`; placeholder from the injector's pattern) and written back into the TOML file via surgical text edits that preserve comments. The TOML file is the single source of truth; no in-memory state diverges from disk.
+
+## Threat model
+
+- **Workspace container**: cannot read the host filesystem, so cannot read `$XDG_STATE_HOME/credproxy/workspaces/<name>/auth.token`. Can hit `/admin/*` endpoints over the shared netns and gets 401 without the token. No window in which `/admin/config` is unauthenticated.
 - **Browser on host**: blocked by Chrome's Private Network Access (we never set `Access-Control-Allow-Private-Network`) plus the `fetch_metadata_guard` middleware (rejects requests with `Sec-Fetch-Site: cross-site`/`same-site`). Both layers act before any handler runs.
-- **Other host users on a multi-user host**: can read `~/.credproxy/<name>/auth.token` (mode 0644 so the in-container uid 31337 can read it through the bind mount) and forge admin requests. Damage ceiling is DoS-or-config-replace — the user's secrets live in op://, keychain, etc., and only enter the proxy through bearer-authenticated config pushes (`credproxy start` / `credproxy config push`). Documented limitation; v1 is a single-user dev workstation tool.
+- **Other host users on a multi-user host**: can read `auth.token` (mode 0644 so the in-container uid 31337 can read it through the bind mount) and forge admin requests. Damage ceiling is DoS-or-config-replace — the user's secrets live in op://, keychain, etc., and only enter the proxy through bearer-authenticated config pushes. Documented limitation; credproxy is a single-user dev workstation tool.
 - **Same-user malicious process**: out of scope (already has access to ssh keys, env vars, etc.).
 
 ## Architecture decisions that should not be casually reversed
@@ -36,17 +38,22 @@ These were spelled out in `design-v0.md` ("Architecture decisions worth preservi
 - **Transparent capture of all TCP**, not port-based selection. The product promise is "every tool works"; selective capture leaks edge cases.
 - **SNI-based intercept decision**, not IP-based. CDN IP reuse breaks IP rules.
 - **HTTP/3 dropped at netfilter** to force TCP fallback, not intercepted. mitmproxy QUIC is experimental.
-- **IPv6 dropped entirely in v1.**
+- **IPv6 dropped entirely.**
 - **Bootstrap over plain HTTP from inside the netns is fine** — no eavesdropper exists on shared loopback/link-local. This resolves the chicken-and-egg of trusting the trust source. Don't add TLS or auth to the bootstrap routes.
 - **Single HTTP listener for admin + bootstrap.** Bearer auth gates `/admin/*`; bootstrap routes are open. Browsers are kept out by PNA + Sec-Fetch-Site, not by a separate listener or a separate iptables rule. Don't re-split.
-- **Host-owned bearer, bind-mounted into the proxy.** The host-side `auth.token` (per-instance, under `~/.credproxy/<name>/`) is the source of truth; the proxy reads it directly from the bind mount on every admin request — no staging copy, no in-memory snapshot, rotation works without restart. Don't reintroduce TOFU or in-container token generation.
-- **Credential lookup must go through an interface** that can be swapped for IPC to a host plugin later. Don't hard-code direct config-file reads inside the inject path; the future host-plugin system is informing the v1 design.
+- **Host-owned bearer, bind-mounted into the proxy.** The host-side `auth.token` (per-workspace, under `$XDG_STATE_HOME/credproxy/workspaces/<name>/`) is the source of truth; the proxy reads it directly from the bind mount on every admin request — no staging copy, no in-memory snapshot, rotation works without restart. Don't reintroduce TOFU or in-container token generation.
+- **Providers are host-side executables, protocol is parent-agnostic.** A provider is a host executable speaking a tiny stdin/stdout JSON protocol (versioned, `op`-keyed). Today the CLI execs it; a future daemon could. Don't embed secret fetching inside the proxy or couple the protocol to the CLI. See `docs/providers.md`.
+- **Push model: the CLI resolves secrets and pushes resolved values to the proxy.** The proxy never calls a provider; the host CLI fetches each secret at `start`/`apply`/`binding test` and POSTs resolved literal values to `/admin/config`. Don't move provider invocation into the proxy.
+- **Placeholder materialization written back to the config file.** Generated names and placeholders are inserted as surgical TOML edits (preserving comments and ordering); the file is the single source of truth. Don't hold generated values in memory or a separate state file.
+- **Ephemeral proxy host port, resolved at call time.** The proxy container is launched with `-p 127.0.0.1:0:39998` (Docker assigns a free port); the CLI resolves it via `docker port` at each call rather than persisting it. This is what allows multiple workspaces to run concurrently without port conflicts. Don't hardcode the host port or cache it.
+- **Strict-by-default two-surface CLI.** `credproxy` is strict (explicit names, no defaults, no prompts, scriptable); `credp` is the human alias (`credproxy --loose`). Convenience lives in the alias, not the default binary behavior, so scripts that omit the flag fail safe. Don't flip the default.
 - **Proxy container holds the proxy core; host plugins (future) handle host-touchy things.** Don't push host-touchy logic into the proxy to "simplify"; it breaks cross-platform.
 
-## v1 non-goals (don't accidentally implement)
+## Non-goals (don't accidentally implement)
 
-- HTTP/3/QUIC interception, IPv6, DNS interception, hostname-based egress allowlisting, process attribution (PID), cert-pinning workarounds, mTLS injection, multi-workspace-per-proxy, bypass-resistance against an adversarial workspace. v1 is a developer convenience boundary, not a hardened jail.
+- HTTP/3/QUIC interception, IPv6, DNS interception, hostname-based egress allowlisting, process attribution (PID), cert-pinning workarounds, mTLS injection, multi-workspace-per-proxy, bypass-resistance against an adversarial workspace. credproxy is a developer convenience boundary, not a hardened jail.
 - Multi-user host support: documented limitation, not a feature.
+- Auto-env-var push convenience (the proxy pushing conventional env vars into the workspace environment directly): deferred per design-v2. The pull model via `/setup` works; the push layer is a future layering on top.
 
 ## Key constants
 
@@ -60,38 +67,88 @@ In-container runtime values (read by `entrypoint.sh` and `constants.py`):
 
 CLI/image contract (also read by `bin/credproxy` from `Config.Env`):
 
-- `CREDPROXY_HTTP_PORT=39998` — merged HTTP API bind port (admin + bootstrap). CLI publishes it (`-p 127.0.0.1:39998:39998`) and POSTs to it for `config`.
+- `CREDPROXY_HTTP_PORT=39998` — merged HTTP API bind port (admin + bootstrap). CLI publishes it as an ephemeral host port (`-p 127.0.0.1:0:39998`) and resolves the actual port via `docker port` at call time.
 - `CREDPROXY_TMPFS=/run/secrets` — CLI sets up `--tmpfs` here with `mode=1777` (so the proxy's unprivileged uid can write `config.json`, including after a `docker start`); `admin.py` writes `config.json` to this directory.
 - `CREDPROXY_TOKEN_PATH=/run/secrets-ro/auth.token` — CLI bind-mounts the host token here; `admin.py` reads from this exact path.
 - `CREDPROXY_SOURCE=/opt/proxy` — CLI bind-mounts `proxy/` here for dev (live edits + `credproxy dev reload`); also the Dockerfile `WORKDIR`.
 
+## Storage layout
+
+XDG-based. Override with the XDG env vars (works for tests too).
+
+```
+$XDG_CONFIG_HOME/credproxy/                      # default ~/.config/credproxy/
+  workspaces/<name>.toml                          # per-workspace config
+  injectors/<name>.toml                           # user injector registry
+  providers/<name>  (or <name>/run)               # user provider registry
+
+$XDG_STATE_HOME/credproxy/                        # default ~/.local/state/credproxy/
+  default-workspace                               # current-default pointer (loose surface)
+  workspaces/<name>/
+    auth.token                                    # bearer token (mode 0644)
+    setup_done                                    # spec hash of last successful setup
+    applied-spec.json                             # last applied container spec (for drift)
+    applied-bindings.json                         # last pushed bindings metadata (no secrets)
+    sessions/<pid>                                # pidfiles for auto-stop tracking
+```
+
+Bundled injectors and providers ship with the CLI package at `cli/credproxy_cli/bundled/`; user definitions shadow bundled ones of the same name (first match wins).
+
 ## Commands
 
-The host CLI is `bin/credproxy`. Run as `./bin/credproxy <cmd>` (or symlink onto `$PATH`).
+Two entry points:
 
-A credproxy **instance** is a named, persistent (proxy + workspace) container pair. Per-instance state lives on the host under `~/.credproxy/<name>/` — `config.yaml` (the `image` / `home` / `mounts` / `hosts` schema; see `design-v1.md`) and `auth.token`; override the root with `$CREDPROXY_HOME`. `<name>` defaults to `default` everywhere. Only one instance runs at a time — `start` stops whatever else is running.
+- `bin/credproxy` — **strict surface**: explicit workspace names everywhere, no default resolution, no prompts, no aliases, scriptable. The contract.
+- `bin/credp` — **loose surface** (`credproxy --loose`): adds default-workspace resolution (announced on stderr), short aliases, and a confirmation gate on destructive-and-implicit actions. The human entry point.
 
-**Instance commands:**
+`--json` is orthogonal: available on both surfaces; errors serialize as JSON, streaming commands (`logs`) emit JSON-lines.
 
-- `credproxy create [NAME] [--image IMG]` — scaffold `~/.credproxy/<NAME>/` (a templated `config.yaml` + `auth.token`). Does not start anything.
-- `credproxy start [NAME]` — (re)create/start the proxy container, wait for `/health`, push config, then (re)create/start the workspace container joined to the proxy's netns. Auto-creates the instance if missing. A container is recreated when its launch spec drifts — proxy: the credproxy image changed; workspace: `image`/`home`/`mounts` or the proxy netns peer changed (tracked via the `credproxy.spec` label).
-- `credproxy stop [NAME]` — `docker stop -t 1` both containers; they are kept, not removed.
-- `credproxy shell [NAME] [-- CMD...]` — `docker exec` into the workspace (default `bash`); auto-starts a stopped instance. The primary verb.
-- `credproxy list` — instances with status (running/stopped) and image.
-- `credproxy delete [NAME]` — remove both containers, the home volume, and `~/.credproxy/<NAME>/` (prompts; `-y` skips).
-- `credproxy config {show,edit,push} [NAME]` — `show` prints `config.yaml`; `edit` opens `$EDITOR`; `push` resolves `${secret:NAME}` refs from host env and POSTs the `hosts:` section to a running proxy.
-- `credproxy logs [NAME]` — `docker logs -f` the proxy container.
+**Workspace commands (canonical):**
 
-**Harness commands** — `credproxy dev ...`, for hacking on credproxy itself; these need the repo checkout:
+- `credproxy workspace create NAME [--image IMG]` — scaffold `<name>.toml` + `auth.token`. Does not start anything.
+- `credproxy workspace use NAME` — set the default workspace pointer (loose surface only).
+- `credproxy current` — print the default workspace pointer (`{"default": ...}` under `--json`); the read-only companion to `use`.
+- `credproxy workspace list [FILTER]` (or `credproxy list`) — workspaces with running status and image; current default marked.
+- `credproxy workspace NAME enter [-- CMD...]` — hot path: start if needed, `docker exec` into the workspace (default `bash`). Tracks auto-stop sessions. The primary verb.
+- `credproxy workspace NAME start` — (re)start the proxy container, wait for `/health`, push bindings config, then (re)start the workspace container. Auto-creates if missing. Recreates a container when its spec drifts (proxy: image changed; workspace: image/home/mounts/env/setup or proxy netns peer changed, tracked via `credproxy.spec` label).
+- `credproxy workspace NAME stop` — `docker stop -t 1` both containers; kept, not removed.
+- `credproxy workspace NAME delete` — remove both containers, home volume, config file, and state dir. In loose mode, prompts when targeting the default workspace.
+- `credproxy workspace NAME apply` — best-effort reconcile: bindings drift → live re-push to the running proxy; container-spec drift (image/home/mounts/env/setup) → deferred with a restart hint. Reports what was applied vs. deferred.
+- `credproxy workspace NAME inspect` — config + running state + host port + binding summary + itemized drift against applied-spec/applied-bindings.
+- `credproxy workspace NAME logs` — `docker logs -f` the proxy container.
+
+**Binding commands (through a workspace):**
+
+- `credproxy workspace NAME binding add --injector INJ --provider PROV --secret REF --host HOST [--host HOST...] [--name NAME] [--placeholder PH] [--env VAR]`
+- `credproxy workspace NAME binding remove BINDING_NAME`
+- `credproxy workspace NAME binding list`
+- `credproxy workspace NAME binding test [BINDING_NAME]` — dry-run fetch via provider (reports secret length, not value); exit 1 if any fail.
+- `credproxy workspace binding test --provider PROV --secret REF [--injector INJ]` — ad-hoc mode: test a definition *before* it is bound. No workspace is resolved or required (the workspace name is ignored); validates that the provider/injector resolve and the fetch succeeds.
+
+**Definition commands:**
+
+- `credproxy injector scaffold NAME` — copy the bundled `bearer` template to `$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml`.
+- `credproxy injector list`
+- `credproxy provider scaffold NAME` — copy the bundled `env` template to `$XDG_CONFIG_HOME/credproxy/providers/<name>`.
+- `credproxy provider list`
+
+**Loose aliases** (loose surface / `credp` only):
+
+`credp enter [NAME]`, `credp start [NAME]`, `credp stop [NAME]`, `credp delete [NAME]`, `credp apply [NAME]`, `credp inspect [NAME]`, `credp logs [NAME]`, `credp use NAME`, `credp create NAME [--image IMG]`, `credp list [FILTER]`, `credp binding {add|remove|list|test} ...` — all resolve to the canonical workspace command with the current default as the implicit workspace. An explicit NAME overrides the default.
+
+**Harness commands** — `credproxy dev ...`, for hacking on credproxy itself; need the repo checkout:
 
 - `credproxy dev build` — `docker build` the proxy image.
 - `credproxy dev test [-- PYTEST_ARGS...]` — pytest inside the proxy image. Trailing args pass through to pytest.
-- `credproxy dev reload [NAME]` — SIGHUP the instance's proxy; python re-execs in place, picking up edited source from the bind-mounted `proxy/`. The container, netns, iptables rules, and tmpfs all survive, so pushed config persists. A python crash takes the container down (no supervisor); recover with `credproxy start`.
+- `credproxy dev reload [NAME]` — SIGHUP the workspace's proxy; python re-execs in place, picking up edited source from the bind-mounted `proxy/`. The container, netns, iptables rules, and tmpfs all survive, so pushed config persists. A python crash takes the container down (no supervisor); recover with `credproxy workspace NAME start`.
+
+**Safety gate** (loose surface only): destructive commands that operate on an **implicit** (defaulted) workspace require confirmation. Explicit targets never prompt. `--yes` / `-y` bypasses. Fails closed without a TTY. Destructive set: `delete`, `binding remove` (both high recovery cost). `stop` is not gated (restart is cheap).
 
 ## Open design questions
 
 Surface these rather than picking silently if your work touches one:
 
-- **`/llms.txt` format.** Currently free-form prose; structured/AGENTS.md-style alternatives haven't been evaluated.
+- **Injector/provider authoring contract is provisional.** The `format` field is parsed and stored but currently unused on the wire (the proxy substitutes placeholder → real inside whatever header value the client sent; the surrounding format is already in the request). The full contract — inject-transform, generate-placeholder, when format is applied by the proxy vs. the client — is a separable sub-design. Don't bake in assumptions about format semantics.
 - **Per-request vs. per-host injection.** Currently strictly per-host; no path/method matching.
-- **Proxy CA persistence across recreate.** mitmproxy's CA is regenerated on a proxy *recreate* (not on stop/start or a crash — those keep the same container). Currently a re-bootstrap cost, not silent breakage: a proxy recreate is coupled to a workspace recreate, and the workspace's CA trust lives only in its writable layer, so the workspace re-bootstraps anyway. Would become a real gap only if CA trust were made durable across workspace recreates. See `design-v1.md` (CA persistence + the auto-bootstrap ideas).
+- **Proxy CA persistence across recreate.** mitmproxy's CA is regenerated on a proxy *recreate* (not on stop/start or a crash — those keep the same container). Currently a re-bootstrap cost, not silent breakage: a proxy recreate is coupled to a workspace recreate, and the workspace's CA trust lives only in its writable layer, so the workspace re-bootstraps anyway. Would become a real gap only if CA trust were made durable across workspace recreates.
+- **`/llms.txt` format.** Currently free-form prose; structured/AGENTS.md-style alternatives haven't been evaluated.
