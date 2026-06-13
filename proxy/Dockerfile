@@ -31,7 +31,8 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY entrypoint.sh main.py addon.py bootstrap.py \
-     admin.py config.py constants.py ./
+     admin.py config.py constants.py starlark_runtime.py ./
+COPY scripts ./scripts
 RUN chmod 0755 entrypoint.sh
 
 ENTRYPOINT ["/opt/proxy/entrypoint.sh"]

@@ -275,6 +275,16 @@ hosts — plus per-slot placeholders for multi-slot; never provider/secret-id/re
 3. **Starlark runtime** (escape hatch) + the bundled Starlark re-implementations
    of the built-ins (dogfood/examples/benchmark) + the timeout wrapper. Closes
    the long tail (#5b OVH, `jwt-bearer`, quirks) as scripts.
+   - **3a (done):** `proxy/starlark_runtime.py` (`ScriptedScheme` + trusted
+     primitives + `Globals.standard()` sandbox, `load()` neutralized, thread+
+     timeout failing closed) via `starlark-pyo3`; bundled `proxy/scripts/`
+     dogfood of bearer/basic/body, proven behaviourally identical to the Python
+     built-ins, with a Python-vs-Starlark benchmark. **Not yet wired into config
+     dispatch** — see 3b.
+   - **3b (next):** the scripted-injector authoring contract — the injector TOML
+     declares `scheme = "script"`, the `.star` file, and `family`/`slots`/
+     `location_kind` (the host CLI stays declarative; only on_request/on_response
+     live in the script); plus `jwt-bearer`/OVH as worked examples.
 4. **Re-seal** (the response-phase + dynamic-placeholder store), as the additive
    extension the seams above anticipate.
 
@@ -295,3 +305,7 @@ hosts — plus per-slot placeholders for multi-slot; never provider/secret-id/re
 - **Built-in vs Starlark for the hot path** — built-ins are Python; the
   benchmark from the dogfood Starlark versions decides whether scripted injectors
   are ever fast enough to be the *only* implementation (not planned, but measured).
+  **Measured (3a):** the Starlark bearer is ~56× the Python built-in per call
+  (~215µs vs ~3.8µs), dominated by the thread-hop the fail-closed timeout
+  requires. Negligible against network latency (fine for the long tail), but it
+  confirms the built-ins stay Python on the hot path.
