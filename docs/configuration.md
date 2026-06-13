@@ -64,8 +64,13 @@ placeholder = "ghp_…"             # auto-generated if omitted
 env         = "GITHUB_TOKEN"      # defaults to the injector's hint
 
 # A multi-slot secret uses an inline table (slot -> provider ref) instead of a
-# bare string; the scheme declares which slots it needs:
-#   secret = { access_key_id = "AWS_ACCESS_KEY_ID", secret_access_key = "AWS_SECRET_ACCESS_KEY" }
+# bare string; the scheme declares which slots it needs. E.g. a sigv4 binding
+# (sign family — no placeholder; the proxy re-signs each request):
+[[binding]]
+injector = "sigv4"
+provider = "env"
+secret   = { access_key_id = "AWS_ACCESS_KEY_ID", secret_access_key = "AWS_SECRET_ACCESS_KEY" }
+hosts    = ["sts.amazonaws.com"]
 ```
 
 ### Container settings

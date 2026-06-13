@@ -53,11 +53,11 @@ for the service. Schemes fall into two families:
 
 | Scheme | Family | Built-in | Covers |
 |---|---|---|---|
-| `bearer` | substitute | now | most REST APIs (GitHub PAT, OpenAI, Stripe…) |
-| `basic` | substitute | now | git over HTTPS, registries, any HTTP Basic |
-| `body` | substitute | next | OAuth2 client-creds (Azure/runZero), key-in-body |
+| `bearer` | substitute | done | most REST APIs (GitHub PAT, OpenAI, Stripe…) |
+| `basic` | substitute | done | git over HTTPS, registries, any HTTP Basic |
+| `body` | substitute | done | OAuth2 client-creds (Azure/runZero), key-in-body |
 | `header` | substitute | next | arbitrary custom-header / cookie / query keys |
-| `sigv4` | sign | later | AWS + all S3-compatible services |
+| `sigv4` | sign | done | AWS + all S3-compatible services |
 | `hmac` | sign | later | webhook-style body signatures |
 | `jwt-bearer` | sign/mint | later | GCP SA, GitHub App, Snowflake (RS256 assertion) |
 
@@ -266,7 +266,12 @@ hosts — plus per-slot placeholders for multi-slot; never provider/secret-id/re
 1. **Transform core + Python built-ins** (`bearer`, `basic`, `body`), designed
    against the transform interface; provider protocol v2 (batch); multi-slot
    secret model; `basic` decode-and-swap + `--preset github`. Closes #3, #4.
-2. **`sigv4`** (sign family) — closes #5a. Validates the sign-family shape.
+   **(Done.)**
+2. **`sigv4`** (sign family) — closes #5a. Validates the sign-family shape. The
+   proxy re-signs: the workspace's SDK signs with throwaway creds, the proxy
+   reads the scope it chose, recomputes the canonical request, and re-signs with
+   the real key (verified against AWS's published IAM ListUsers vector).
+   **(Done.)**
 3. **Starlark runtime** (escape hatch) + the bundled Starlark re-implementations
    of the built-ins (dogfood/examples/benchmark) + the timeout wrapper. Closes
    the long tail (#5b OVH, `jwt-bearer`, quirks) as scripts.

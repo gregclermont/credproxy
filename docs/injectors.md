@@ -21,13 +21,14 @@ as configuration, not code. Schemes fall into two families:
   proxy finds it in the scheme's wire location and swaps in the real value,
   decoding/re-encoding as needed.
 - **sign** — no usable static value on the wire; the proxy holds a signing key
-  and computes the auth material per request. *(Added in a later wave.)*
+  and computes the auth material per request.
 
-| Scheme | Family | Params | Covers |
-|---|---|---|---|
-| `bearer` | substitute | `header` (default `Authorization`) | most REST APIs (PATs, OpenAI, Stripe, …) |
-| `basic` | substitute | `header` (default `Authorization`) | git-over-HTTPS, registries, any HTTP Basic |
-| `body` | substitute | — | OAuth2 client-credentials, key-in-body APIs |
+| Scheme | Family | Params | Slots | Covers |
+|---|---|---|---|---|
+| `bearer` | substitute | `header` (default `Authorization`) | `value` | most REST APIs (PATs, OpenAI, Stripe, …) |
+| `basic` | substitute | `header` (default `Authorization`) | `value` | git-over-HTTPS, registries, any HTTP Basic |
+| `body` | substitute | — | `value` | OAuth2 client-credentials, key-in-body APIs |
+| `sigv4` | sign | — | `access_key_id`, `secret_access_key` | AWS + all S3-compatible services |
 
 `bearer` substring-swaps the placeholder for the real value inside the named
 header (any `Bearer `/`token ` prefix the client sent is left intact). `basic`
@@ -35,6 +36,14 @@ decodes the `Authorization: Basic` blob, swaps the component equal to the
 placeholder (password by default, or username), and re-encodes — so the
 placeholder is a **bare token**, never hand-computed base64. `body` swaps the
 placeholder anywhere in the request body.
+
+`sigv4` (sign family) is different: the AWS secret is a *signing key* that never
+transits the wire, so there is no placeholder. The workspace's AWS SDK signs
+each request with **throwaway** credentials; the proxy reads the credential
+scope (region/service) the SDK chose from the incoming `Authorization`,
+recomputes the canonical request, and re-signs it with the real key. It is a
+**multi-slot** scheme (`access_key_id` + `secret_access_key`); region and
+service are read from the request, so it takes no params.
 
 ## Discovery
 
@@ -113,6 +122,20 @@ scheme owns the wire shape.
 | `bearer` | `bearer` | `header = Authorization` | default (`credproxy_` + 30 alnum, 40 total) | none |
 | `basic` | `basic` | `header = Authorization` | default | none |
 | `body` | `body` | — | default | none |
+| `sigv4` | `sigv4` | — | none (sign family) | none |
+
+A `sigv4` binding uses a multi-slot secret, e.g.:
+
+```sh
+credproxy workspace NAME binding add --injector sigv4 --provider env \
+    --secret access_key_id=AWS_ACCESS_KEY_ID \
+    --secret secret_access_key=AWS_SECRET_ACCESS_KEY \
+    --host sts.amazonaws.com
+```
+
+In the workspace, configure any throwaway AWS credentials (e.g. dummy
+`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`) so the SDK produces a signed
+request for the proxy to re-sign.
 
 `bearer` doubles as the scaffold template for new injectors. A GitHub PAT, which
 is `bearer` on `api.github.com` but HTTP `basic` on `github.com`/`ghcr.io`, is
