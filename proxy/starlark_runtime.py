@@ -18,9 +18,26 @@ Why this is safe (the door model):
 - Host-scoping lives in the binding, outside the script, so even a shared
   third-party injector can't choose a destination or exfiltrate the secret.
 
-The one gap (no step/fuel limit is exposed by starlark-pyo3): each call runs in
-a thread with a timeout and the flow FAILS CLOSED on overrun -- a runaway is a
-recoverable DoS of one workspace's proxy, never an exfiltration.
+Non-exfiltration, concretely: `Globals.standard()` has no `print`, and a script
+error message is NEVER logged (only the exception type is) -- otherwise a script
+could `fail(secret(ctx))` and leak the value to proxy stdout. The only data
+channel a script has is the request itself, which is already host-scoped to the
+binding's destination.
+
+**Runaway scripts (the real resource-bounds gap).** A Python-thread timeout
+CANNOT preempt a CPU-bound script: starlark-pyo3 holds the GIL for the whole
+evaluation (and exposes no step limit on `FrozenModule.call`), so a thread join
+can't return until the script releases the GIL -- which a sandboxed (I/O-free)
+script never does mid-compute. The correct mechanism is cooperative
+cancellation: `check_cancelled` (starlark-pyo3 PR #51) fires a callback every
+~1000 bytecode instructions and aborts when it returns True, so a deadline can
+actually interrupt a runaway. PR #51 adds it to `eval()` but not yet to
+`FrozenModule.call` (which our hot path uses). We therefore FEATURE-DETECT
+support on `.call` (see `_CALL_SUPPORTS_CANCEL`) and pass a deadline cancel when
+present; until that lands+releases, a non-terminating script hangs the proxy
+until the container is restarted. That DoS is accepted: scripts are trusted
+host-authored control-plane config (like provider executables), and it does not
+weaken the sandbox's non-exfiltration / no-I/O guarantees.
 
 This module is proxy-only (it imports `starlark`, present only in the proxy
 image). It is not wired into config dispatch yet; design-v3 phase 3b adds the
@@ -29,22 +46,57 @@ scripted-injector authoring contract that builds ScriptedScheme from a binding.
 from __future__ import annotations
 
 import base64
-import concurrent.futures
 import re
+import time
 
 import starlark
 
-# A real credential injection is sub-millisecond; this is a generous ceiling
-# that bounds a runaway script's effect on the proxy.
+# A real credential injection is sub-millisecond; this is a generous deadline
+# that bounds a runaway script ONCE check_cancelled is available on the call
+# path (see module docstring).
 DEFAULT_TIMEOUT = 2.0
 
 _GLOBALS = starlark.Globals.standard()
 
-# Shared executor purely to impose a per-call deadline. Calls are effectively
-# serial (the addon hook blocks awaiting the result), so a few workers suffice.
-_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="starlark"
-)
+
+def make_deadline_cancel(timeout_seconds: float, check_every: int = 256):
+    """A `check_cancelled` callback that aborts evaluation after a wall-clock
+    deadline. starlark-pyo3 fires it every ~1000 instructions; to keep the
+    clock read cheap it only samples `time.monotonic()` every `check_every`
+    fires (a power of two -- larger = coarser but cheaper; 256 ≈ 25-40ms
+    response). Once the deadline passes, every subsequent fire returns True."""
+    mask = check_every - 1
+    end = time.monotonic() + timeout_seconds
+    n = [0]
+    cancelled = [False]
+
+    def cancel() -> bool:
+        n[0] += 1
+        if n[0] & mask == 0:
+            cancelled[0] = time.monotonic() >= end
+        return cancelled[0]
+
+    return cancel
+
+
+def _detect_call_cancel() -> bool:
+    """True if FrozenModule.call accepts a `check_cancelled` kwarg (starlark-pyo3
+    PR #51 extended to the call path). Probed once at import; until it lands we
+    run calls without an enforceable deadline."""
+    try:
+        m = starlark.Module()
+        starlark.eval(m, starlark.parse("_probe.star",
+                                        "def _p(c):\n    return True\n"), _GLOBALS)
+        m.freeze().call("_p", starlark.OpaquePythonObject(object()),
+                        check_cancelled=lambda: False)
+        return True
+    except TypeError:
+        return False
+    except Exception:
+        return False  # conservative: any oddity -> treat as unsupported
+
+
+_CALL_SUPPORTS_CANCEL = _detect_call_cancel()
 
 
 # ---- trusted primitives ------------------------------------------------------
@@ -133,6 +185,8 @@ class ScriptedScheme:
         self.slots = tuple(slots)
         self.location_kind = location_kind
         self.header_default = header_default
+        # Deadline for cooperative cancellation; enforced only when the call
+        # path supports check_cancelled (see module docstring).
         self._timeout = timeout
         self._has_on_response = bool(_HAS_ON_RESPONSE.search(source))
 
@@ -153,21 +207,26 @@ class ScriptedScheme:
         return self._invoke("on_response", ctx)
 
     def _invoke(self, fn_name: str, ctx) -> bool:
-        """Run the script function under a timeout, failing CLOSED on any error
-        or overrun (return False, log). The orphaned worker thread on a timeout
-        is the documented recoverable-DoS ceiling."""
-        future = _EXECUTOR.submit(
-            self._frozen.call, fn_name, starlark.OpaquePythonObject(ctx)
-        )
+        """Run the script function, failing CLOSED on any error (return False,
+        log). When the call path supports check_cancelled, a wall-clock deadline
+        aborts a runaway; otherwise a non-terminating script hangs the proxy
+        (documented ceiling -- a Python-thread timeout can't preempt the GIL).
+
+        The error is logged by EXCEPTION TYPE ONLY -- never its message --
+        because a script could `fail(secret(ctx))` and the message would carry
+        the real credential to stdout, defeating the non-exfiltration guarantee.
+        """
+        opaque = starlark.OpaquePythonObject(ctx)
         try:
-            return bool(future.result(timeout=self._timeout))
-        except concurrent.futures.TimeoutError:
-            print(
-                f"[script] {self.name}.{fn_name} exceeded {self._timeout}s; "
-                f"failing closed (request left unmodified)",
-                flush=True,
-            )
+            if _CALL_SUPPORTS_CANCEL:
+                result = self._frozen.call(
+                    fn_name, opaque,
+                    check_cancelled=make_deadline_cancel(self._timeout),
+                )
+            else:
+                result = self._frozen.call(fn_name, opaque)
+        except Exception as e:  # StarlarkError / primitive error / deadline abort
+            print(f"[script] {self.name}.{fn_name} raised {type(e).__name__}; "
+                  f"failing closed", flush=True)
             return False
-        except Exception as e:  # StarlarkError, host-primitive error, ...
-            print(f"[script] {self.name}.{fn_name} failed: {e}", flush=True)
-            return False
+        return bool(result)

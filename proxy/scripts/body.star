@@ -7,7 +7,9 @@
 def on_request(ctx):
     text = body_text(ctx)
     ph = placeholder(ctx)
-    if text == None or ph == None:
+    # `not text` matches the built-in: a None or empty body is a no-op (and
+    # guards the `ph not in text` membership test below from a None text).
+    if not text or ph == None:
         return False
     if ph not in text:
         return False

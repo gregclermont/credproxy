@@ -137,11 +137,17 @@ the long tail and per-service quirks.
   (host-scoping lives in the binding, outside the script). This makes a scripted
   injector strictly *more* contained than the provider executables we already
   accept.
-- **Resource bounds (the one gap):** the binding exposes no step/time limit.
-  Mitigation: run each script in a thread executor with a timeout and **fail the
-  flow closed** on overrun. A runaway is a recoverable DoS of one workspace's
-  proxy (within the documented "DoS-or-config-replace" ceiling), never an
-  exfiltration. Longer term: expose starlark-rust's step limit upstream.
+- **Resource bounds (the one gap):** the binding exposes no step/time limit, and
+  a Python-thread timeout **cannot** enforce one — starlark-pyo3 holds the GIL
+  for the whole evaluation, so a thread join can't return until the (I/O-free,
+  never-GIL-yielding) script finishes. The correct mechanism is cooperative
+  cancellation: `check_cancelled` (starlark-pyo3 PR #51) fires a callback every
+  ~1000 instructions and aborts on a deadline. PR #51 adds it to `eval()` but not
+  yet to `FrozenModule.call` (our hot path); the runtime **feature-detects**
+  support on the call path and passes a deadline cancel when present. Until that
+  lands+releases, a non-terminating script hangs the proxy until restart — an
+  accepted DoS (within the documented "DoS-or-config-replace" ceiling, scripts
+  being trusted host config), never an exfiltration.
 - The **workspace can never supply a script** — injectors are host-authored
   control-plane config (the door model), same trust boundary as v2's injector
   TOML.
@@ -276,8 +282,10 @@ hosts — plus per-slot placeholders for multi-slot; never provider/secret-id/re
    of the built-ins (dogfood/examples/benchmark) + the timeout wrapper. Closes
    the long tail (#5b OVH, `jwt-bearer`, quirks) as scripts.
    - **3a (done):** `proxy/starlark_runtime.py` (`ScriptedScheme` + trusted
-     primitives + `Globals.standard()` sandbox, `load()` neutralized, thread+
-     timeout failing closed) via `starlark-pyo3`; bundled `proxy/scripts/`
+     primitives + `Globals.standard()` sandbox, `load()` neutralized, errors
+     fail closed with type-only logging so `fail(secret)` can't leak,
+     feature-detected `check_cancelled` deadline for runaways) via
+     `starlark-pyo3`; bundled `proxy/scripts/`
      dogfood of bearer/basic/body, proven behaviourally identical to the Python
      built-ins, with a Python-vs-Starlark benchmark. **Not yet wired into config
      dispatch** — see 3b.
@@ -305,7 +313,6 @@ hosts — plus per-slot placeholders for multi-slot; never provider/secret-id/re
 - **Built-in vs Starlark for the hot path** — built-ins are Python; the
   benchmark from the dogfood Starlark versions decides whether scripted injectors
   are ever fast enough to be the *only* implementation (not planned, but measured).
-  **Measured (3a):** the Starlark bearer is ~56× the Python built-in per call
-  (~215µs vs ~3.8µs), dominated by the thread-hop the fail-closed timeout
-  requires. Negligible against network latency (fine for the long tail), but it
-  confirms the built-ins stay Python on the hot path.
+  **Measured (3a):** the Starlark bearer is ~9× the Python built-in per call
+  (~32µs vs ~3.7µs) running inline. Negligible against network latency (fine for
+  the long tail), but it confirms the built-ins stay Python on the hot path.
