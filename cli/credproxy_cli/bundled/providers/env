@@ -1,17 +1,17 @@
 #!/bin/sh
 # credproxy bundled provider: env
 #
-# Reads a host environment variable named by the request's `secret` ref and
-# returns its value. Implements the provider exec protocol (docs/providers.md).
+# Reads host environment variables named by the request's `secrets` refs and
+# returns their values. Implements the batch provider protocol (docs/providers.md).
 #
-#   Request  (stdin):  {"version":1,"op":"get","secret":"GITHUB_TOKEN"}
-#   Response (stdout): {"value":"<value of $GITHUB_TOKEN>"}
-#   Exit 2 if the variable is unset; exit 3 on an unsupported version/op.
+#   Request  (stdin):  {"version":1,"op":"get","secrets":["GITHUB_TOKEN", ...]}
+#   Response (stdout): {"values":{"GITHUB_TOKEN":"<value>", ...}}
+#   Exit 2 if any variable is unset; exit 3 on an unsupported version/op.
 #
 # Uses python3 -c for JSON parsing -- the proxy host needs python3 anyway, so
 # this keeps the script dependency-free and quoting-safe. The request JSON
 # arrives on stdin (note: a `<<HEREDOC` would consume stdin, so we use -c).
-# Copy this file as a starting point (`credproxy scaffold provider NAME`).
+# Copy this file as a starting point (`credproxy provider scaffold NAME`).
 exec python3 -c '
 import json, os, sys
 try:
@@ -22,11 +22,14 @@ except Exception as e:
 if req.get("version") != 1 or req.get("op") != "get":
     print("env provider: unsupported version/op", file=sys.stderr)
     sys.exit(3)
-name = req.get("secret") or ""
-val = os.environ.get(name)
-if val is None:
-    print(f"env provider: ${name} is not set in the host environment",
-          file=sys.stderr)
-    sys.exit(2)
-json.dump({"value": val}, sys.stdout)
+refs = req.get("secrets") or []
+values = {}
+for name in refs:
+    val = os.environ.get(name)
+    if val is None:
+        print(f"env provider: ${name} is not set in the host environment",
+              file=sys.stderr)
+        sys.exit(2)
+    values[name] = val
+json.dump({"values": values}, sys.stdout)
 '

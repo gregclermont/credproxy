@@ -1,0 +1,13 @@
+# credproxy bundled injector: basic
+#
+# HTTP Basic injector. Runs the `basic` scheme: the proxy decodes the
+# `Authorization: Basic` blob, swaps the component equal to the placeholder
+# (the password by default, or the username) for the real credential, and
+# re-encodes. The placeholder is a BARE token -- no hand-computed base64 -- so
+# the same placeholder also works as a `bearer` token elsewhere.
+# Covers git-over-HTTPS, container registries, any HTTP Basic endpoint.
+
+scheme = "basic"                # proxy mechanism: decode-and-swap Basic auth
+
+# [params]                       # basic params (defaults shown)
+# header = "Authorization"       # the header the credential rides in

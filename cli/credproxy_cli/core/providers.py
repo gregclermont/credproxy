@@ -1,11 +1,17 @@
 """Provider registry + invocation.
 
-A *provider* is a host-side executable that fetches a secret value from a
+A *provider* is a host-side executable that fetches secret values from a
 backend, speaking the small versioned stdin/stdout protocol documented in
 `docs/providers.md`. This module resolves a provider by name and execs it,
-mapping its exit codes to typed errors. The CLI pushes the *resolved* value
+mapping its exit codes to typed errors. The CLI pushes the *resolved* values
 to the proxy; the protocol deliberately says nothing about who the parent is
 (today the CLI, tomorrow maybe a daemon).
+
+The protocol is **batch-native** (design-v3): one invocation carries a list of
+refs and returns a ref->value map. This means a binding's whole multi-slot
+credential resolves in a single exec -- an interactive provider prompts once,
+a vault provider can coalesce same-item refs. A single value is just a list of
+one; there is no single/batch duality on the wire.
 
 Discovery (first match wins, user shadows bundled):
   1. $XDG_CONFIG_HOME/credproxy/providers/<name>
@@ -102,16 +108,22 @@ def _tail(text: str, lines: int = 5) -> str:
     return "\n".join(text.splitlines()[-lines:])
 
 
-def fetch(provider_name: str, secret_id: str) -> str:
-    """Exec the named provider with a `get` request and return the secret.
+def fetch_many(provider_name: str, refs: list[str]) -> dict[str, str]:
+    """Exec the named provider once with a batch `get` request and return the
+    ref->value map.
 
-    stdin carries the request JSON; stdout must be exactly the response JSON;
+    stdin carries the request JSON (`{"version":1,"op":"get","secrets":[...]}`);
+    stdout must be exactly the response JSON (`{"values":{ref:value,...}}`);
     stderr stays inherited from the terminal so interactive providers can
     prompt. Exit codes map to ProviderError variants (2 = not found,
-    3 = unsupported, other nonzero = generic failure)."""
+    3 = unsupported, other nonzero = generic failure). Every requested ref
+    must appear in `values` as a string, or it is a protocol error."""
+    if not refs:
+        return {}
     provider = find_provider(provider_name)
+    refs_label = ", ".join(f"'{r}'" for r in refs)
     request = json.dumps(
-        {"version": PROTOCOL_VERSION, "op": "get", "secret": secret_id}
+        {"version": PROTOCOL_VERSION, "op": "get", "secrets": list(refs)}
     )
 
     try:
@@ -129,7 +141,7 @@ def fetch(provider_name: str, secret_id: str) -> str:
     except subprocess.TimeoutExpired:
         raise ProviderError(
             f"provider '{provider_name}' timed out after "
-            f"{FETCH_TIMEOUT:.0f}s fetching '{secret_id}'"
+            f"{FETCH_TIMEOUT:.0f}s fetching {refs_label}"
         )
     except OSError as e:
         raise ProviderError(
@@ -139,17 +151,17 @@ def fetch(provider_name: str, secret_id: str) -> str:
 
     if proc.returncode == EXIT_NOT_FOUND:
         raise ProviderError(
-            f"provider '{provider_name}': secret '{secret_id}' not found"
+            f"provider '{provider_name}': secret(s) {refs_label} not found"
         )
     if proc.returncode == EXIT_UNSUPPORTED:
         raise ProviderError(
             f"provider '{provider_name}' does not support this request "
-            f"(version {PROTOCOL_VERSION}, op 'get') for '{secret_id}'"
+            f"(version {PROTOCOL_VERSION}, op 'get')"
         )
     if proc.returncode != 0:
         raise ProviderError(
             f"provider '{provider_name}' failed (exit {proc.returncode}) "
-            f"fetching '{secret_id}'"
+            f"fetching {refs_label}"
         )
 
     out = proc.stdout or ""
@@ -157,18 +169,30 @@ def fetch(provider_name: str, secret_id: str) -> str:
         payload = json.loads(out)
     except json.JSONDecodeError:
         raise ProviderError(
-            f"provider '{provider_name}' returned non-JSON on stdout for "
-            f"'{secret_id}': {_tail(out)!r}"
+            f"provider '{provider_name}' returned non-JSON on stdout: "
+            f"{_tail(out)!r}"
         )
-    if not isinstance(payload, dict) or "value" not in payload:
+    if not isinstance(payload, dict) or not isinstance(payload.get("values"), dict):
         raise ProviderError(
-            f"provider '{provider_name}' response for '{secret_id}' is "
-            f"missing a `value` field"
+            f"provider '{provider_name}' response is missing a `values` object"
         )
-    value = payload["value"]
-    if not isinstance(value, str):
-        raise ProviderError(
-            f"provider '{provider_name}': `value` for '{secret_id}' must be "
-            f"a string, got {type(value).__name__}"
-        )
-    return value
+    values = payload["values"]
+    resolved: dict[str, str] = {}
+    for ref in refs:
+        if ref not in values:
+            raise ProviderError(
+                f"provider '{provider_name}' response is missing ref '{ref}'"
+            )
+        v = values[ref]
+        if not isinstance(v, str):
+            raise ProviderError(
+                f"provider '{provider_name}': value for '{ref}' must be a "
+                f"string, got {type(v).__name__}"
+            )
+        resolved[ref] = v
+    return resolved
+
+
+def fetch(provider_name: str, secret_id: str) -> str:
+    """Resolve a single ref. Convenience wrapper over the batch protocol."""
+    return fetch_many(provider_name, [secret_id])[secret_id]

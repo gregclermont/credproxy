@@ -26,7 +26,8 @@ from typing import Callable
 
 from .errors import ConfigError
 from .injectors import Injector, find_injector
-from .providers import fetch as provider_fetch
+from .providers import fetch_many as provider_fetch_many
+from .schemes import get_scheme, location_key
 from .workspace import Workspace
 
 import tomllib
@@ -43,10 +44,26 @@ class Binding:
     name: str
     injector: str
     provider: str
-    secret: str
+    # Single-slot sugar (bare ref) or a slot->ref table for multi-slot schemes.
+    secret: str | dict[str, str]
     hosts: tuple[str, ...]
     placeholder: str | None  # None until materialized
     env: str | None
+
+
+def secret_refs(binding: Binding) -> dict[str, str]:
+    """Normalize a binding's `secret` to a slot->ref map. A bare string is the
+    single-slot `value` sugar; a table is taken verbatim."""
+    if isinstance(binding.secret, str):
+        return {"value": binding.secret}
+    return dict(binding.secret)
+
+
+def secret_display(secret: str | dict[str, str]) -> str:
+    """Human-friendly rendering of a binding's secret refs (never values)."""
+    if isinstance(secret, str):
+        return secret
+    return ", ".join(f"{slot}={ref}" for slot, ref in secret.items())
 
 
 # ---- parsing / validation ---------------------------------------------------
@@ -71,8 +88,24 @@ def _parse_bindings(raw: dict, source: str) -> list[Binding]:
         if not isinstance(provider, str) or not provider:
             raise ConfigError(f"{source}: {where}.provider is required (string)")
         secret = b.get("secret")
-        if not isinstance(secret, str) or not secret:
-            raise ConfigError(f"{source}: {where}.secret is required (string)")
+        if isinstance(secret, str):
+            if not secret:
+                raise ConfigError(f"{source}: {where}.secret must be non-empty")
+        elif isinstance(secret, dict):
+            if not secret or not all(
+                isinstance(k, str) and k and isinstance(v, str) and v
+                for k, v in secret.items()
+            ):
+                raise ConfigError(
+                    f"{source}: {where}.secret table must map non-empty slot "
+                    f"names to non-empty refs"
+                )
+            secret = dict(secret)
+        else:
+            raise ConfigError(
+                f"{source}: {where}.secret is required (a ref string or a "
+                f"slot->ref table)"
+            )
 
         hosts = b.get("hosts")
         if not isinstance(hosts, list) or not hosts \
@@ -115,13 +148,14 @@ def _auto_name(injector: str, provider: str, taken: set[str]) -> str:
 
 
 def validate(bindings: list[Binding], source: str) -> None:
-    """Cross-binding validation: unique names; unique (host, header); and
-    injector/provider must resolve. Names must already be materialized
-    (non-None) for the uniqueness check; callers run this post-materialize."""
+    """Cross-binding validation: unique names; unique (host, wire-location);
+    injector/provider must resolve; and the binding's secret slots must match
+    the scheme's. Names must already be materialized (non-None) for the
+    uniqueness check; callers run this post-materialize."""
     from .providers import find_provider
 
     names: set[str] = set()
-    host_header: dict[tuple[str, str], str] = {}
+    seen_loc: dict[tuple, str] = {}  # (host, location) -> binding name
     for b in bindings:
         if b.name is None:
             # Should not happen post-materialize; defensive.
@@ -133,16 +167,27 @@ def validate(bindings: list[Binding], source: str) -> None:
         # injector + provider must exist (raises InjectorError/ProviderError).
         injector = find_injector(b.injector)
         find_provider(b.provider)
+        spec = get_scheme(injector.scheme)
 
-        header = injector.header
+        # secret slots must match the scheme's declared slots.
+        got = set(secret_refs(b))
+        want = set(spec.slots)
+        if got != want:
+            raise ConfigError(
+                f"{source}: binding '{b.name}' scheme '{injector.scheme}' needs "
+                f"secret slot(s) {{{', '.join(sorted(want))}}}, got "
+                f"{{{', '.join(sorted(got))}}}"
+            )
+
+        loc = location_key(spec, injector.params)
         for host in b.hosts:
-            key = (host, header)
-            if key in host_header:
+            key = (host, loc)
+            if key in seen_loc:
                 raise ConfigError(
-                    f"{source}: bindings '{host_header[key]}' and '{b.name}' "
-                    f"both claim header '{header}' on host '{host}'"
+                    f"{source}: bindings '{seen_loc[key]}' and '{b.name}' both "
+                    f"write {loc[0]} on host '{host}'"
                 )
-            host_header[key] = b.name
+            seen_loc[key] = b.name
 
 
 def load_bindings(ws: Workspace) -> list[Binding]:
@@ -277,13 +322,20 @@ def append_binding(ws: Workspace, binding: Binding) -> None:
     """Append a fully-formed `[[binding]]` block to the workspace TOML as a
     text append (preserving the existing file)."""
     text = ws.config_path.read_text()
+    if isinstance(binding.secret, dict):
+        # Multi-slot: an inline table keeps the mapping inside the [[binding]]
+        # element (a [binding.secret] sub-table is invalid under array-of-tables).
+        inner = ", ".join(f'{slot} = "{ref}"' for slot, ref in binding.secret.items())
+        secret_line = f"secret   = {{ {inner} }}"
+    else:
+        secret_line = f'secret   = "{binding.secret}"'
     lines = [
         "",
         "[[binding]]",
         f'name     = "{binding.name}"',
         f'injector = "{binding.injector}"',
         f'provider = "{binding.provider}"',
-        f'secret   = "{binding.secret}"',
+        secret_line,
         "hosts    = [" + ", ".join(f'"{h}"' for h in binding.hosts) + "]",
     ]
     if binding.placeholder is not None:
@@ -330,19 +382,21 @@ class BindingTestResult:
 
 def test_binding(
     binding: Binding,
-    fetch: Callable[[str, str], str] = provider_fetch,
+    fetch_many: Callable[[str, list[str]], dict[str, str]] = provider_fetch_many,
 ) -> BindingTestResult:
     """Exec the binding's provider and report success/failure WITHOUT
-    revealing the secret value (only its length). Never raises a provider
-    error -- it is captured into the result so callers can report per-binding
-    in a batch."""
+    revealing the secret values (only their total length). Resolves every slot
+    in one batch invocation. Never raises a provider error -- it is captured
+    into the result so callers can report per-binding in a batch."""
     from .errors import CredproxyError
 
+    refs = secret_refs(binding)
     try:
-        value = fetch(binding.provider, binding.secret)
+        values = fetch_many(binding.provider, list(dict.fromkeys(refs.values())))
     except CredproxyError as e:
         return BindingTestResult(binding.name, False, None, str(e))
-    return BindingTestResult(binding.name, True, len(value), None)
+    total = sum(len(values[ref]) for ref in refs.values())
+    return BindingTestResult(binding.name, True, total, None)
 
 
 # ---- wire mapping (push path) -----------------------------------------------
@@ -350,46 +404,54 @@ def test_binding(
 
 def wire_config(
     bindings: list[Binding],
-    fetch: Callable[[str, str], str] = provider_fetch,
+    fetch_many: Callable[[str, list[str]], dict[str, str]] = provider_fetch_many,
 ) -> dict:
-    """Resolve each binding's secret and produce the proxy's bindings wire shape:
+    """Resolve each binding's secret(s) and produce the proxy's bindings wire
+    shape (design-v3, scheme-aware):
 
         {
           "bindings": [
             {
               "name":        <str>,
               "hosts":       [<str>, ...],
-              "header":      <str>,
-              "placeholder": <str>,
-              "real":        <str>,       # raw fetched value; no format applied
-              "env":         <str|null>,  # optional suggested env var
+              "scheme":      <str>,            # selects the proxy mechanism
+              "params":      {<str>: <any>},   # scheme-defined (e.g. header)
+              "secret":      {<slot>: <real>}, # resolved values, keyed by slot
+              "placeholder": <str>,            # substitute family; the token
+                                               #   the proxy finds/swaps
+              "env":         <str|null>,       # optional suggested env var
             },
             ...
           ]
         }
 
-    `real` is the RAW fetched value -- the proxy substitutes only the
-    placeholder substring inside whatever header value the client sent, so the
-    surrounding `format` (e.g. "Bearer ") is already present in the request and
-    must NOT be applied here.
+    Each `secret` value is the RAW fetched value -- substitute schemes replace
+    only the placeholder substring inside whatever the client sent, so any
+    surrounding format ("Bearer ", a base64 blob) is handled on the wire / by
+    the scheme, not applied here. One batch provider invocation per binding.
 
-    `fetch` is injected for testing; defaults to the real provider exec.
+    `fetch_many` is injected for testing; defaults to the real provider exec.
     """
     wire_bindings = []
     for b in bindings:
         injector = find_injector(b.injector)
-        if b.placeholder is None:
+        spec = get_scheme(injector.scheme)
+        if spec.family == "substitute" and b.placeholder is None:
             raise ConfigError(
                 f"binding '{b.name}' has no placeholder; materialize it first"
             )
-        real = fetch(b.provider, b.secret)
+        refs = secret_refs(b)
+        values = fetch_many(b.provider, list(dict.fromkeys(refs.values())))
+        secret = {slot: values[ref] for slot, ref in refs.items()}
         entry: dict = {
             "name": b.name,
             "hosts": list(b.hosts),
-            "header": injector.header,
-            "placeholder": b.placeholder,
-            "real": real,
+            "scheme": injector.scheme,
+            "params": injector.params,
+            "secret": secret,
         }
+        if b.placeholder is not None:
+            entry["placeholder"] = b.placeholder
         # env: prefer the binding-level override, fall back to the injector's
         # suggested env var, omit entirely if neither is set.
         env = b.env if b.env is not None else injector.env

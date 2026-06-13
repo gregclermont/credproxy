@@ -1,18 +1,20 @@
 """Injector registry + placeholder generation.
 
 An *injector* defines HOW a credential is shaped into a request for a service:
-which header it rides in, how it is formatted, and the shape of the inert
-placeholder the workspace holds. Unlike providers (executables), injectors are
-declarative TOML files -- passive, reusable, drop-in.
+which typed scheme the proxy runs, the scheme's params, and the shape of the
+inert placeholder the workspace holds. Unlike providers (executables),
+injectors are declarative TOML files -- passive, reusable, drop-in.
 
 Discovery (first match wins, user shadows bundled):
   1. $XDG_CONFIG_HOME/credproxy/injectors/<name>.toml
   2. bundled  cli/credproxy_cli/bundled/injectors/<name>.toml
 
 Schema:
-    header = "Authorization"      # required: header carrying the credential
-    format = "Bearer {value}"     # optional, default "{value}"
+    scheme = "bearer"             # required: a scheme in core/schemes.CATALOG
     env    = "GITHUB_TOKEN"       # optional: suggested workspace env var
+
+    [params]                      # optional; scheme-specific (defaults merged)
+    header = "Authorization"      #   e.g. bearer/basic: the header to write
 
     [placeholder]                 # optional; pattern for the inert sentinel
     prefix  = "ghp_"
@@ -28,6 +30,7 @@ from pathlib import Path
 
 from .errors import InjectorError
 from .paths import bundled_injectors_dir, injectors_config_dir
+from .schemes import get_scheme, merge_params
 
 import tomllib
 
@@ -35,9 +38,6 @@ import tomllib
 DEFAULT_PREFIX = "credproxy_"
 DEFAULT_LENGTH = 40
 DEFAULT_CHARSET = "alnumeric"
-
-# `format` default: the credential value verbatim.
-DEFAULT_FORMAT = "{value}"
 
 _CHARSETS = {
     # Lowercase + uppercase + digits. Named "alnumeric" to match the schema
@@ -65,20 +65,17 @@ class Placeholder:
 
 @dataclass(frozen=True)
 class Injector:
-    """A resolved injector definition.
+    """A resolved injector definition: the typed scheme the proxy runs, its
+    params (merged with the scheme's defaults), the suggested env var, and the
+    placeholder pattern the workspace holds.
 
-    NOTE on `format`: the proxy's substitution is a literal substring replace
-    of placeholder -> real value INSIDE whatever header value the client sent.
-    The injector's `format` describes what the WORKSPACE is expected to send
-    (and so what the placeholder is embedded in) -- it informs the env-var
-    suggestion and authoring docs, NOT the wire config, which today only needs
-    the bare placeholder -> real mapping. `format` is kept in the schema because
-    the authoring contract evolves in a later wave (the proxy may apply the
-    full format itself); for now treat it as documentation."""
+    `scheme` selects the proxy-side mechanism (substitute family: bearer/basic/
+    body; sign family later). `params` is scheme-defined and passed through to
+    the proxy verbatim on the wire (e.g. bearer/basic's `header`)."""
 
     name: str
-    header: str
-    format: str
+    scheme: str
+    params: dict
     env: str | None
     placeholder: Placeholder
     source: str  # "user" or "bundled"
@@ -118,24 +115,26 @@ def _parse(path: Path, name: str, source: str) -> Injector:
     if not isinstance(raw, dict):
         raise InjectorError(f"injector '{name}': top level must be a table")
 
-    header = raw.get("header")
-    if not isinstance(header, str) or not header:
+    scheme_name = raw.get("scheme")
+    if not isinstance(scheme_name, str) or not scheme_name:
         raise InjectorError(
-            f"injector '{name}': `header` is required and must be a non-empty string"
+            f"injector '{name}': `scheme` is required and must be a non-empty string"
         )
-    fmt = raw.get("format", DEFAULT_FORMAT)
-    if not isinstance(fmt, str) or "{value}" not in fmt:
-        raise InjectorError(
-            f"injector '{name}': `format` must be a string containing '{{value}}'"
-        )
+    spec = get_scheme(scheme_name)  # raises InjectorError on an unknown scheme
+
+    params_raw = raw.get("params")
+    if params_raw is not None and not isinstance(params_raw, dict):
+        raise InjectorError(f"injector '{name}': [params] must be a table")
+    params = merge_params(spec, params_raw)
+
     env = raw.get("env")
     if env is not None and (not isinstance(env, str) or not env):
         raise InjectorError(f"injector '{name}': `env` must be a non-empty string")
 
     return Injector(
         name=name,
-        header=header,
-        format=fmt,
+        scheme=scheme_name,
+        params=params,
         env=env,
         placeholder=_placeholder_from(raw, name),
         source=source,

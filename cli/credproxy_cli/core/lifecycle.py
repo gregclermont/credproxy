@@ -337,7 +337,7 @@ class BindingSummary:
     name: str
     injector: str
     provider: str
-    secret: str
+    secret: str | dict[str, str]
     hosts: tuple[str, ...]
     placeholder: str | None
     env: str | None

@@ -1,14 +1,17 @@
 # credproxy bundled injector: bearer
 #
-# Generic bearer-token injector: puts the credential in an Authorization
-# header as `Bearer <value>`. No service-specific placeholder shape, so the
-# default sentinel (credproxy_ + 30 alnum chars = 40 total) is used. This
-# doubles as the scaffold template for new injectors
-# (`credproxy scaffold injector NAME`).
+# Generic bearer-token injector. Runs the `bearer` scheme: the proxy
+# substring-swaps the inert placeholder for the real credential inside the
+# Authorization header (the "Bearer " prefix the client sends is left as-is).
+# Covers most REST APIs (OpenAI, Stripe, GitHub PATs on api.github.com, ...).
+# This doubles as the scaffold template for new injectors
+# (`credproxy injector scaffold NAME`).
 
-header = "Authorization"        # request header the credential rides in
-format = "Bearer {value}"       # how the credential appears in the header value
+scheme = "bearer"               # proxy mechanism: substitute in a header
 # env  = "API_TOKEN"            # optional: suggested workspace-side env var
+
+# [params]                       # bearer params (defaults shown)
+# header = "Authorization"       # the header the credential rides in
 
 # [placeholder] omitted -> default pattern: prefix "credproxy_", length 40,
 # charset "alnumeric". Add a [placeholder] table to match a service's token

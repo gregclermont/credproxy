@@ -1,0 +1,9 @@
+# credproxy bundled injector: body
+#
+# Request-body injector. Runs the `body` scheme: the proxy substring-swaps the
+# inert placeholder for the real credential anywhere in the request body.
+# Covers OAuth2 client-credentials (`client_secret=...` in a form/JSON body)
+# and other key-in-body APIs the workspace's client builds itself.
+
+scheme = "body"                 # proxy mechanism: substitute in the request body
+# env  = "CLIENT_SECRET"        # optional: suggested workspace-side env var
