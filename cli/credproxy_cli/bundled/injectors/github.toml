@@ -1,0 +1,15 @@
+# credproxy bundled injector: github
+#
+# Shapes a GitHub personal-access token into an Authorization header.
+# The placeholder mimics a classic PAT (ghp_ + 36 alnum chars = 40 total)
+# so client-side token-format checks pass while the real value stays on the
+# host. Copy this file to author your own (`credproxy scaffold injector NAME`).
+
+header = "Authorization"        # request header the credential rides in
+format = "Bearer {value}"       # how the credential appears in the header value
+env    = "GITHUB_TOKEN"         # suggested workspace-side env var
+
+[placeholder]                    # pattern for the inert, format-valid sentinel
+prefix  = "ghp_"
+length  = 40                     # total length including the prefix
+charset = "alnumeric"            # alnumeric | hex | base64url

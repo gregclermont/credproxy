@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""credp: the human alias for `credproxy --loose`.
+
+`credp` is the intended human entry point: it turns on the convenience surface
+(default-workspace resolution, short command aliases, the confirmation gate)
+over the same core. Normally you'd install it as a shell alias
+(`alias credp='credproxy --loose'`); since the repo can't install an alias for
+you, this tiny shim execs the same entrypoint with the loose surface pre-set.
+Explicit `--loose` on `credproxy` is equivalent.
+"""
+import sys
+from pathlib import Path
+
+# This shim lives at <repo>/bin/credp; the package is at <repo>/cli.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "cli"))
+
+from credproxy_cli.porcelain.cli import main
+
+if __name__ == "__main__":
+    main(loose_default=True)
