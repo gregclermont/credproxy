@@ -41,6 +41,7 @@ Both surfaces share the same core; `--json` is available on either for machine-r
 ## Further reading
 
 - `design-v2.md` — full design spec: concepts, security model, CLI grammar, extensibility
+- `docs/configuration.md` — workspace config: the TOML file format and the CLI that edits it
 - `docs/workspace.md` — netns constraints, bootstrap guide, egress shape
 - `docs/providers.md` — provider exec protocol (writing your own backend)
 - `CLAUDE.md` — architecture guide for working on credproxy itself
