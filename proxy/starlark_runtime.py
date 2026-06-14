@@ -84,17 +84,21 @@ class make_deadline_cancel:
 
 def _detect_call_cancel() -> bool:
     """True if FrozenModule.call accepts a `check_cancelled` kwarg (starlark-pyo3
-    PR #51 extended to the call path). Probed once at import; until it lands we
-    run calls without an enforceable deadline."""
+    extended to the call path; eval-cancel-and-stack-limit). Probed once at
+    import; until it lands+releases we run calls without an enforceable deadline.
+
+    The probe function must NOT start with `_`: Starlark treats leading-underscore
+    names as module-private, so they are not exported on freeze() and `.call`
+    raises 'symbol not exported'. (`on_request`/`on_response` are fine.)"""
     try:
         m = starlark.Module()
-        starlark.eval(m, starlark.parse("_probe.star",
-                                        "def _p(c):\n    return True\n"), _GLOBALS)
-        m.freeze().call("_p", starlark.OpaquePythonObject(object()),
+        starlark.eval(m, starlark.parse("probe.star",
+                                        "def probe(c):\n    return True\n"), _GLOBALS)
+        m.freeze().call("probe", starlark.OpaquePythonObject(object()),
                         check_cancelled=lambda: False)
         return True
     except TypeError:
-        return False
+        return False  # no check_cancelled kwarg -> unsupported
     except Exception:
         return False  # conservative: any oddity -> treat as unsupported
 

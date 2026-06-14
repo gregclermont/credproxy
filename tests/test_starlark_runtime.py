@@ -201,6 +201,22 @@ def test_make_deadline_cancel_holds_before_deadline():
 
 def test_call_cancel_support_is_a_bool():
     import starlark_runtime
-    # Whether FrozenModule.call accepts check_cancelled yet (PR #51 + release);
-    # just assert the feature flag is well-formed so detection can't crash.
+    # Whether FrozenModule.call accepts check_cancelled yet (the call-path
+    # extension + a release); just assert the feature flag is well-formed so
+    # detection can't crash.
     assert isinstance(starlark_runtime._CALL_SUPPORTS_CANCEL, bool)
+
+
+def test_leading_underscore_functions_are_not_exported():
+    """Starlark does not export leading-underscore names on freeze(), so .call
+    can't reach them -- the reason on_request/on_response (and the cancel-
+    detection probe) must NOT start with '_'. Guards the gotcha that silently
+    broke _detect_call_cancel."""
+    m = starlark.Module()
+    starlark.eval(m, starlark.parse(
+        "t.star", "def shown(c):\n    return True\ndef _hidden(c):\n    return True\n"
+    ), starlark.Globals.standard())
+    fm = m.freeze()
+    assert fm.call("shown", starlark.OpaquePythonObject(object())) is True
+    with pytest.raises(starlark.StarlarkError):
+        fm.call("_hidden", starlark.OpaquePythonObject(object()))
