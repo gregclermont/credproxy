@@ -28,6 +28,7 @@ as configuration, not code. Schemes fall into two families:
 | `bearer` | substitute | `header` (default `Authorization`) | `value` | most REST APIs (PATs, OpenAI, Stripe, …) |
 | `basic` | substitute | `header` (default `Authorization`) | `value` | git-over-HTTPS, registries, any HTTP Basic |
 | `body` | substitute | — | `value` | OAuth2 client-credentials, key-in-body APIs |
+| `oauth2-reseal` | substitute | `api_hosts` (required), `token_field`, `expires_field`, `ttl`, `reseal_header` | `value` | OAuth2 client-credentials where even the minted token must stay out of the workspace |
 | `sigv4` | sign | — | `access_key_id`, `secret_access_key` | AWS + all S3-compatible services |
 
 `bearer` substring-swaps the placeholder for the real value inside the named
@@ -44,6 +45,36 @@ scope (region/service) the SDK chose from the incoming `Authorization`,
 recomputes the canonical request, and re-signs it with the real key. It is a
 **multi-slot** scheme (`access_key_id` + `secret_access_key`); region and
 service are read from the request, so it takes no params.
+
+`oauth2-reseal` (substitute family) closes the gap plain pass-through leaves
+open. Pass-through keeps the *durable* client secret out of the workspace, but
+the short-lived token the OAuth2 token endpoint mints still lands there.
+Re-seal holds that token in the proxy too. On the **request** phase it behaves
+like `body`: the workspace sends the token-endpoint request with a placeholder
+where `client_secret` goes (`location_kind = body`, single `value` slot), and
+the proxy swaps placeholder→real secret. On the **response** phase it parses the
+token-endpoint response, extracts the minted token from `token_field` (default
+`access_token`), registers a TTL'd `bearer` swap (a freshly-minted dynamic
+placeholder → the real token) on the `api_hosts`, and rewrites the response body
+so the workspace receives the *placeholder* instead of the token. The TTL comes
+from the response's `expires_field` (default `expires_in`), falling back to the
+`ttl` param (default `3600` seconds) when the response omits it; once it elapses
+the runtime swap is evicted. When the workspace later calls an API host with that
+placeholder, the request-phase swap (in the `reseal_header`, default
+`Authorization`) substitutes the real minted token — which thus never enters the
+workspace. A *dynamic* placeholder is just a static one registered at runtime
+with a TTL; the data-plane swap reuses the `bearer` substitute.
+
+The binding is scoped (via `--host`) to the **token endpoint** host. The
+`api_hosts` param lists the hosts where the minted token is used; they are
+TLS-terminated so the swap applies there too. Because `api_hosts` is
+deployment-specific, you **copy** the bundled `oauth2-reseal` injector to
+`$XDG_CONFIG_HOME/credproxy/injectors/` and edit `api_hosts` (a user injector
+shadows the bundled one) — the same copy-to-edit pattern as `jwt-bearer`. A
+bundled **scripted** twin, `oauth-reseal` (scheme `script`), demonstrates the
+same flow via the [`mint`](#scripted-injectors-the-escape-hatch) primitives; use
+it as the escape-hatch template when you need to customize re-seal beyond the
+built-in scheme's params.
 
 ## Discovery
 
@@ -122,6 +153,7 @@ scheme owns the wire shape.
 | `bearer` | `bearer` | `header = Authorization` | default (`credproxy_` + 30 alnum, 40 total) | none |
 | `basic` | `basic` | `header = Authorization` | default | none |
 | `body` | `body` | — | default | none |
+| `oauth2-reseal` | `oauth2-reseal` | `api_hosts` (edit before use), `token_field`, `expires_field`, `ttl`, `reseal_header` | default | none |
 | `sigv4` | `sigv4` | — | none (sign family) | none |
 
 A `sigv4` binding uses a multi-slot secret, e.g.:
@@ -274,9 +306,9 @@ prefix also encodes the **phase** they belong to:
   was answered.
 - `req_set_*` **mutators** are **request-phase only** — calling `req_set_header`
   or `req_set_body` from `on_response()` raises (→ fail closed).
-- `resp_*` are **response-phase only** — calling any of them from `on_request()`
-  raises (→ fail closed). The response phase is the design-v3 phase-4 re-seal
-  seam.
+- `resp_*` (and the re-seal `mint`/`mint_into_json`) are **response-phase
+  only** — calling any of them from `on_request()` raises (→ fail closed). The
+  response phase is where design-v3 phase-4 re-seal runs.
 
 **Credential & binding**
 
@@ -314,6 +346,19 @@ prefix also encodes the **phase** they belong to:
 | `resp_body()` | `str\|None` | The response body as text, or `None`. |
 | `resp_set_body(text)` | — | Replace the response body. |
 | `resp_json()` | `dict\|None` | The response body parsed as JSON, or `None` if absent / not valid JSON (**total** — branch on `== None`, no `try`/`except`). |
+
+**Re-seal (response phase only)**
+
+These mint a re-seal swap from a token the proxy just intercepted. They are
+**response-phase only** — calling either from `on_request()` raises (→ fail
+closed). The target hosts and header come from the binding **params**
+(`api_hosts` and `reseal_header`, default `Authorization`), not primitive args,
+so a re-seal script supplies only `value` + `ttl`.
+
+| Primitive | Returns | Purpose |
+|---|---|---|
+| `mint(value, ttl)` | `str` | Register a runtime swap (a freshly-minted placeholder → `value`) on the binding's `api_hosts` param for `ttl` seconds, and return the placeholder. The target header is the binding's `reseal_header` param (default `Authorization`). |
+| `mint_into_json(field, value, ttl)` | `str` | `mint(value, ttl)`, then rewrite the response body's JSON `field` to the placeholder (so the workspace receives the placeholder, not the real token). Parses the body before registering, so a non-JSON body fails closed without leaving a dangling runtime entry. Returns the placeholder. |
 
 The pure primitives take no context and are deterministic (except `now`/`now_ms`).
 
@@ -367,7 +412,7 @@ Starlark environment has no JSON builtin or f-strings — use `json_encode()` /
 
 ### Bundled scripted injectors
 
-Two sign-family examples ship as bundled injectors.
+Two sign-family examples and a re-seal example ship as bundled injectors.
 
 **`ovh`** — signs OVH API requests. Sets `X-Ovh-Application`,
 `X-Ovh-Consumer`, `X-Ovh-Timestamp`, and `X-Ovh-Signature` (`"$1$" +`
@@ -422,14 +467,51 @@ signature — so the script never hand-builds `b64url_encode(header) + "." + …
 and feeds it to a separate signer. That hand-assembly is the classic JWS
 footgun (mis-encoded padding, signing the wrong bytes) this primitive removes.
 
-> **Status (design-v3 phase 3b).** The runtime, sandbox, and full primitive set
+**`oauth-reseal`** — the scripted twin of the built-in `oauth2-reseal` scheme,
+demonstrating re-seal via the `mint` primitives. Its injector manifest sets
+`location_kind = "body"` and a `[params] api_hosts = [...]` list (copy it to your
+user injectors dir and edit `api_hosts`). The script swaps the `client_secret`
+placeholder into the token-endpoint request (request phase), then on the
+response mints a re-seal swap and rewrites the body so the workspace gets the
+placeholder back:
+
+```python
+def on_request():
+    text = req_body()
+    ph = placeholder()
+    if not text or ph == None or ph not in text:
+        return False
+    req_set_body(text.replace(ph, secret()))
+    return True
+
+def on_response():
+    if resp_status() != 200:
+        return False
+    tok = resp_json()
+    if tok == None:
+        return False
+    access = tok.get("access_token")
+    if access == None:
+        return False
+    mint_into_json("access_token", access, tok.get("expires_in", 3600))
+    return True
+```
+
+`mint_into_json()` reads `api_hosts`/`reseal_header` from the binding params, so
+the script passes only the token value and TTL; it parses the body before
+registering the swap, so a non-JSON response fails closed without leaving a
+dangling runtime entry.
+
+> **Status (design-v3 phase 4).** The runtime, sandbox, and full primitive set
 > are implemented: sign-family crypto (carrier `hmac_sha256` + `b64_to_hex`/
 > `hex_to_b64` for multi-round signing like AWS SigV4, plus `hmac_sha256_hex`,
 > `sha256_hex`, `sha1_hex`, `rs256_sign`), JWT (`jwt_encode_sign`,
 > `jwt_decode_or_none`), JSON (`json_encode`, `json_decode`, and the total
 > `resp_json()`), and request/response introspection — alongside the bundled
-> `ovh` and `jwt-bearer` examples. The response-phase (`resp_*`) primitives are
-> the phase-4 re-seal seam. The runaway-deadline mechanism is wired and verified
+> `ovh` and `jwt-bearer` examples. Phase-4 **re-seal** has landed: the
+> response-phase `mint`/`mint_into_json` primitives, the built-in
+> `oauth2-reseal` scheme, and the bundled `oauth-reseal` scripted twin all ship.
+> The runaway-deadline mechanism is wired and verified
 > against starlark-pyo3's call-path `check_cancelled` (feature-detected); it
 > activates automatically once a wheel carrying that support is published. Until
 > then a non-terminating script hangs the proxy — scripts are trusted host

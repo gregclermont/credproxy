@@ -298,8 +298,24 @@ hosts — plus per-slot placeholders for multi-slot; never provider/secret-id/re
      `now`, request introspection) and worked `ovh` + `jwt-bearer` bundled
      examples ship and are tested (OVH signature self-validates; the JWT verifies
      with `cryptography`). Closes the rest of #5.
-4. **Re-seal** (the response-phase + dynamic-placeholder store), as the additive
-   extension the seams above anticipate.
+4. **Re-seal (done):** the response-phase + dynamic-placeholder store, built on
+   the seams above. `BindingCredentials` gained a TTL'd runtime layer
+   (`register_runtime(host, transform, ttl)`, lazy expiry); a proxy-side
+   placeholder generator (`proxy/placeholders.py`) and `RuntimeMinter` mint a
+   dynamic placeholder = a static one registered at runtime, so the data-plane
+   swap reuses the bearer substitute. `ResponseCtx.mint`/`mint_into_json` +
+   the script `mint`/`mint_into_json` primitives expose it; a built-in
+   `oauth2-reseal` scheme (client_secret body-swap on request, mint+rewrite on
+   response, `api_hosts` TLS-terminated via `extra_intercept_hosts`) covers
+   OAuth2 client-credentials, with a scripted `oauth-reseal` twin. The minted
+   token's TTL comes from the response `expires_in`. Single-binding-per-token-
+   endpoint only; multi-binding disambiguation (open question below) deferred.
+
+Note: the scripted primitive surface was reworked to the flat/implicit-ctx
+"option B" model (zero-arg hooks; `req_*`/`resp_*` primitives over a contextvar-
+bound ctx; carrier crypto so SigV4-class signing is expressible; `api`-versioned
+manifests) after this doc's phase 3b; the `hex_sha1`/`rs256_sign_b64url`-style
+names above are superseded by `sha1_hex`/`rs256_sign`/etc. See docs/injectors.md.
 
 ---
 
