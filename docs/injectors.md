@@ -184,30 +184,36 @@ edit or clear its `placeholder` in the workspace config.
 When the built-in schemes can't express a service's auth (a bespoke signature, a
 multi-step token mint), an injector can run a **Starlark script** in the proxy
 instead. The injector TOML stays declarative — it sets `scheme = "script"`,
-names a `.star` file, and declares the metadata the host CLI can't infer by
-reading Starlark (`family`, `slots`, and the wire `location_kind`). The script
-carries only the logic: `on_request(ctx)` (and optionally `on_response(ctx)`).
+names a `.star` file, declares the primitive-API version it targets (`api`), and
+declares the metadata the host CLI can't infer by reading Starlark (`family`,
+`slots`, and the wire `location_kind`). The script carries only the logic:
+`on_request()` (and optionally `on_response()`).
 
 ```toml
 # ~/.config/credproxy/injectors/myservice.toml
 scheme = "script"
 script = "myservice"         # resolves myservice.star (user dir, then bundled)
+api    = 1                   # primitive-API version the script targets (default 1)
 family = "sign"              # "substitute" (placeholder) | "sign" (no placeholder)
 slots  = ["value"]           # secret slot names the script reads
 location_kind = "header"     # where it writes, for host-collision detection
 env    = "MYSERVICE_TOKEN"
 
-[params]                      # passed to the script verbatim (ctx via param())
+[params]                      # passed to the script verbatim (read via param())
 header = "X-MyService-Auth"
 ```
 
 ```python
 # ~/.config/credproxy/scripts/myservice.star
-def on_request(ctx):
-    header_set(ctx, param(ctx, "header", "Authorization"),
-               "Bearer " + secret(ctx))
+def on_request():
+    req_set_header(param("header", "Authorization"), "Bearer " + secret())
     return True
 ```
+
+The hook takes **no arguments**. There is no `ctx` to thread: the request and
+response context is implicit — the runtime binds it around each call, and the
+flat primitives below read and mutate it directly. A script never receives,
+holds, or passes a context handle.
 
 The script discovery mirrors injectors/providers (`$XDG_CONFIG_HOME/credproxy/
 scripts/<name>.star`, then the bundled set). At `start`/`apply`/`binding test`
@@ -215,48 +221,149 @@ the CLI reads the `.star` **source** and pushes it to the proxy with the config
 (the push model — the proxy stays stateless and compiles what it's given, so
 your scripts work with no mounts or image rebuilds).
 
+### API version
+
+The `api` field declares which primitive-API version the script targets. It is
+**optional and defaults to `1`** (the current version), is pushed on the wire
+with the rest of the binding, and the proxy validates it against the versions it
+implements — a binding whose version the proxy can't run is rejected with a
+clear error rather than silently mis-injecting. This is the forward-compatibility
+seam: if a future release changes the primitive surface incompatibly, it bumps
+the version, and an injector pins the version it was written against so an older
+script keeps running against the semantics it expects.
+
 **Sandbox.** The script runs in the proxy with access to the real credential via
-`secret()`, so it is sandboxed: only the trusted primitives are callable (header
-get/set, body read/replace, `b64encode`/`b64decode`, `secret`, `placeholder`,
-`param`, and the crypto primitives the proxy owns); there is no `print`, I/O,
-filesystem, network, `import`, or `load()`. A script can only shape the request
-bound for the binding's already-fixed host, so even a shared third-party script
-can't choose a destination or exfiltrate the secret. Errors fail closed (the
-request is forwarded unmodified). See `proxy/starlark_runtime.py`.
+`secret()`, so it is sandboxed. `Globals.standard()` is the entire language
+surface available: there is no `print`, I/O, filesystem, network, `import`, or
+`exec`, `load()` is neutralized, and there is **no `try`/`except`** in Starlark.
+Only the trusted primitives below are callable; the crypto and encoding among
+them are owned by the proxy, so scripts orchestrate cryptography but never
+implement it. A script can only shape the request bound for the binding's
+already-fixed host — host-scoping lives in the binding, outside the script — so
+even a shared third-party script can't choose a destination or exfiltrate the
+secret. See `proxy/starlark_runtime.py`.
+
+**Fail-closed.** Any uncaught error in a hook makes the proxy skip injection and
+forward the request **unmodified**. The error is logged by **exception type
+only**, never its message — so a script cannot do something like `fail(secret())`
+to leak the credential into a log. A hook also signals its outcome by return
+value: return `True` if it acted, `False` to no-op (which also fails closed —
+the request is forwarded unmodified).
+
+**Total vs. partial reads.** The primitives follow one convention: a read for
+something that is merely *absent* returns `None` (test it with `== None`), while
+genuinely corrupt input or author error — bad base64, an unknown secret slot,
+invalid JSON passed to `json_decode` — **raises**, which fails closed. So
+`resp_json()` and `jwt_decode_or_none()` are *total* (None on anything malformed,
+no `try`/`except` needed), whereas `json_decode()` is *partial* (raises on bad
+input).
 
 ### Primitives available to scripts
 
-A script defines `on_request(ctx)` (return `True` if it injected, `False` to
-skip) and optionally `on_response(ctx)`. Function names must not start with `_`.
+A script defines `on_request()` (return `True` if it injected, `False` to skip)
+and optionally `on_response()`. Both hooks are **zero-arg** — the context is
+implicit. Function names must not start with `_`.
 
-The full set of trusted primitives:
+The stateful primitives are flat top-level functions that read or mutate the
+implicit context; there is no `ctx` parameter to thread. Their `req_`/`resp_`
+prefix also encodes the **phase** they belong to:
+
+- `req_` **getters** (`req_method`, `req_path`, `req_host`, `req_header`,
+  `req_body`, `req_body_b64`) work in **both** phases — in `on_request()` they
+  read the live outbound request; in `on_response()` they read the request that
+  was answered.
+- `req_set_*` **mutators** are **request-phase only** — calling `req_set_header`
+  or `req_set_body` from `on_response()` raises (→ fail closed).
+- `resp_*` are **response-phase only** — calling any of them from `on_request()`
+  raises (→ fail closed). The response phase is the design-v3 phase-4 re-seal
+  seam.
+
+**Credential & binding**
 
 | Primitive | Returns | Purpose |
 |---|---|---|
-| `secret(ctx, slot="value")` | `str` | The resolved credential for a slot — the only door to the real value. |
-| `placeholder(ctx)` | `str\|None` | The inert placeholder (substitute family). |
-| `param(ctx, key, default=None)` | `str` | An injector `[params]` value. |
-| `header_get(ctx, name)` | `str\|None` | Read a request header (request phase). |
-| `header_set(ctx, name, value)` | — | Write a request header. |
-| `body_text(ctx)` | `str\|None` | Read the request body as text. |
-| `set_body_text(ctx, text)` | — | Replace the request body. |
-| `method(ctx)` | `str` | HTTP method of the current request. |
-| `path(ctx)` | `str` | Request path including query string. |
-| `host(ctx)` | `str` | Request host. |
+| `secret(slot="value")` | `str` | The resolved real credential for a slot — the **only** door to the secret. Raises on an unknown slot (→ fail closed). |
+| `placeholder()` | `str\|None` | The inert placeholder string (substitute family); `None` for the sign family. |
+| `param(key, default=None)` | `str` | A scheme param from the injector's `[params]`. |
+
+**Request — reads (both phases)**
+
+| Primitive | Returns | Purpose |
+|---|---|---|
+| `req_method()` | `str` | The request method (read-only). |
+| `req_path()` | `str` | The request path including query string (read-only). |
+| `req_host()` | `str` | The request host (read-only). |
+| `req_header(name)` | `str\|None` | A request header value, or `None` if absent. |
+| `req_body()` | `str\|None` | The request body as text, or `None`. |
+| `req_body_b64()` | `str\|None` | The request body's raw bytes as base64 (binary-safe), or `None`. |
+
+**Request — mutation (request phase only)**
+
+| Primitive | Returns | Purpose |
+|---|---|---|
+| `req_set_header(name, value)` | — | Set/replace a request header. |
+| `req_set_body(text)` | — | Replace the request body. |
+
+**Response (response phase only — phase-4 re-seal seam)**
+
+| Primitive | Returns | Purpose |
+|---|---|---|
+| `resp_status()` | `int` | The response status code. |
+| `resp_header(name)` | `str\|None` | A response header value, or `None` if absent. |
+| `resp_set_header(name, value)` | — | Set/replace a response header. |
+| `resp_body()` | `str\|None` | The response body as text, or `None`. |
+| `resp_set_body(text)` | — | Replace the response body. |
+| `resp_json()` | `dict\|None` | The response body parsed as JSON, or `None` if absent / not valid JSON (**total** — branch on `== None`, no `try`/`except`). |
+
+The pure primitives take no context and are deterministic (except `now`/`now_ms`).
+
+**Encoding**
+
+| Primitive | Returns | Purpose |
+|---|---|---|
 | `b64encode(s)` | `str` | Standard base64-encode a UTF-8 string. |
 | `b64decode(s)` | `str` | Standard base64-decode to a UTF-8 string. |
-| `b64url_encode(s)` | `str` | Unpadded URL-safe base64 (the JWS form). |
-| `hex_sha1(s)` | `str` | Hex-encoded SHA-1 digest of a UTF-8 string. |
-| `hex_sha256(s)` | `str` | Hex-encoded SHA-256 digest. |
-| `hmac_sha256_hex(key, msg)` | `str` | Hex-encoded HMAC-SHA-256. |
-| `rs256_sign_b64url(private_key_pem, msg)` | `str` | RS256 signature of `msg`, unpadded base64url. |
-| `json_encode(value)` | `str` | Compact JSON of a dict/list/str/int/bool/None. |
-| `now()` | `int` | Current time as Unix seconds. |
+| `b64url_encode(s)` | `str` | Unpadded URL-safe base64 (the JWT/JWS form). |
+| `b64url_decode(s)` | `str` | Decode unpadded URL-safe base64 to a UTF-8 string. |
+| `b64_to_hex(b64)` | `str` | **Carrier** transcode: re-encode raw bytes from base64 to hex **without** a UTF-8 round-trip. |
+| `hex_to_b64(hex)` | `str` | **Carrier** transcode: re-encode raw bytes from hex to base64. |
+
+**Hashing & signing**
+
+| Primitive | Returns | Purpose |
+|---|---|---|
+| `hmac_sha256(key_b64, msg)` | `str` | **Carrier** HMAC-SHA-256: key is base64 of the raw key bytes, output is base64 of the raw MAC — chains output→next-key for multi-round key derivation. |
+| `hmac_sha256_hex(key, msg)` | `str` | Convenience HMAC-SHA-256: text key in, hex out (the common single-shot case). |
+| `sha256_hex(s)` | `str` | Hex SHA-256 digest of a UTF-8 string. |
+| `sha1_hex(s)` | `str` | Hex SHA-1 digest of a UTF-8 string. |
+| `rs256_sign(pem, msg)` | `str` | RS256 (RSASSA-PKCS1-v1_5 / SHA-256) signature over `msg`, as unpadded base64url. `pem` is a PKCS#8/PKCS#1 RSA private key. |
+
+**JWT**
+
+| Primitive | Returns | Purpose |
+|---|---|---|
+| `jwt_encode_sign(header, claims, pem)` | `str` | Build a **signed** RS256 JWS compact token from `header`/`claims` dicts. Owns segment assembly, base64url padding, and signing the right bytes. Returns the `a.b.c` token. |
+| `jwt_decode_or_none(token)` | `dict\|None` | The JWT claims (middle segment) as a dict, or `None` if not a well-formed JWT. **Does not verify** the signature (for reading a token you're re-sealing, not trusting). |
+
+**JSON & time**
+
+| Primitive | Returns | Purpose |
+|---|---|---|
+| `json_encode(value)` | `str` | Compact, deterministic JSON of a Starlark value (dict/list/str/int/bool/None). |
+| `json_decode(s)` | value | Parse a JSON string to a Starlark value. **Raises** on invalid input (→ fail closed; contrast the total `resp_json()`). |
+| `now()` | `int` | Current Unix time, seconds. |
+| `now_ms()` | `int` | Current Unix time, milliseconds. |
 
 The crypto and encoding primitives are owned and trusted by the proxy; scripts
-orchestrate them and never implement crypto. The Starlark environment has no
-`print`, `import`, `load()`, I/O, or JSON builtin — use `json_encode()` for
-JSON serialization and `+` for string concatenation (no f-strings).
+orchestrate them and never implement crypto. Note the **carrier** forms
+(`hmac_sha256` + `b64_to_hex`/`hex_to_b64`): because the carrier-HMAC key and
+output are both base64 of *raw bytes*, the output of one round chains straight
+into the key of the next without a lossy UTF-8 round-trip — that is what makes a
+multi-round derivation like AWS SigV4's
+`hmac(hmac(hmac(hmac("AWS4"+secret, date), region), service), "aws4_request")`
+expressible, ending the chain with `b64_to_hex(...)` for a hex signature. The
+Starlark environment has no JSON builtin or f-strings — use `json_encode()` /
+`json_decode()` for JSON and `+` for string concatenation.
 
 ### Bundled scripted injectors
 
@@ -264,8 +371,9 @@ Two sign-family examples ship as bundled injectors.
 
 **`ovh`** — signs OVH API requests. Sets `X-Ovh-Application`,
 `X-Ovh-Consumer`, `X-Ovh-Timestamp`, and `X-Ovh-Signature` (`"$1$" +`
-hex_sha1 over the concatenated signing string). Slots: `app_key`,
-`app_secret`, `consumer_key`.
+`sha1_hex` over the concatenated signing string, which includes the method,
+full URL, and body read via `req_method()`/`req_host()`/`req_path()`/
+`req_body()`). Slots: `app_key`, `app_secret`, `consumer_key`.
 
 ```sh
 credproxy workspace NAME binding add --injector ovh --provider env \
@@ -289,34 +397,43 @@ A representative excerpt from `jwt-bearer.star` showing how the primitives
 compose:
 
 ```python
-def on_request(ctx):
+def on_request():
     now_ts = now()
-    ttl    = int(param(ctx, "ttl", "3600"))
+    ttl    = int(param("ttl", "3600"))
 
-    header = json_encode({"alg": "RS256", "typ": "JWT"})
-    claims = json_encode({
-        "iss": param(ctx, "iss"),
-        "aud": param(ctx, "aud"),
-        "iat": now_ts,
-        "exp": now_ts + ttl,
-    })
+    jwt = jwt_encode_sign(
+        {"alg": "RS256", "typ": "JWT"},
+        {
+            "iss": param("iss"),
+            "aud": param("aud"),
+            "iat": now_ts,
+            "exp": now_ts + ttl,
+        },
+        secret("private_key"),
+    )
 
-    signing_input = b64url_encode(header) + "." + b64url_encode(claims)
-    sig = rs256_sign_b64url(secret(ctx, "private_key"), signing_input)
-    jwt = signing_input + "." + sig
-
-    header_set(ctx, "Authorization", "Bearer " + jwt)
+    req_set_header("Authorization", "Bearer " + jwt)
     return True
 ```
 
-> **Status (design-v3 phase 3b).** The runtime, sandbox, full primitive set
-> (including sign-family crypto: `hmac_sha256_hex`, `rs256_sign_b64url`,
-> `json_encode`, `now`, and request introspection), and the bundled `ovh` and
-> `jwt-bearer` examples are implemented. The runaway-deadline mechanism is
-> wired and verified against starlark-pyo3's call-path `check_cancelled`
-> (feature-detected); it activates automatically once a wheel carrying that
-> support is published. Until then a non-terminating script hangs the proxy —
-> scripts are trusted host config.
+`jwt_encode_sign()` owns the JWS assembly — base64url-encoding each segment,
+joining `header.claims`, signing exactly those bytes, and appending the
+signature — so the script never hand-builds `b64url_encode(header) + "." + …`
+and feeds it to a separate signer. That hand-assembly is the classic JWS
+footgun (mis-encoded padding, signing the wrong bytes) this primitive removes.
+
+> **Status (design-v3 phase 3b).** The runtime, sandbox, and full primitive set
+> are implemented: sign-family crypto (carrier `hmac_sha256` + `b64_to_hex`/
+> `hex_to_b64` for multi-round signing like AWS SigV4, plus `hmac_sha256_hex`,
+> `sha256_hex`, `sha1_hex`, `rs256_sign`), JWT (`jwt_encode_sign`,
+> `jwt_decode_or_none`), JSON (`json_encode`, `json_decode`, and the total
+> `resp_json()`), and request/response introspection — alongside the bundled
+> `ovh` and `jwt-bearer` examples. The response-phase (`resp_*`) primitives are
+> the phase-4 re-seal seam. The runaway-deadline mechanism is wired and verified
+> against starlark-pyo3's call-path `check_cancelled` (feature-detected); it
+> activates automatically once a wheel carrying that support is published. Until
+> then a non-terminating script hangs the proxy — scripts are trusted host
+> config.
 
 ## See also
 

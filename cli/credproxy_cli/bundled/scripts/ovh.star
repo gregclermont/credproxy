@@ -20,22 +20,22 @@
 #       --secret consumer_key=OVH_CONSUMER_KEY \
 #       --host eu.api.ovh.com
 
-def on_request(ctx):
-    app_key = secret(ctx, "app_key")
-    app_secret = secret(ctx, "app_secret")
-    consumer_key = secret(ctx, "consumer_key")
+def on_request():
+    app_key = secret("app_key")
+    app_secret = secret("app_secret")
+    consumer_key = secret("consumer_key")
 
     ts = str(now())
-    body = body_text(ctx)
+    body = req_body()
     if body == None:
         body = ""
 
-    url = "https://" + host(ctx) + path(ctx)
-    base = app_secret + "+" + consumer_key + "+" + method(ctx) + "+" + url + "+" + body + "+" + ts
-    signature = "$1$" + hex_sha1(base)
+    url = "https://" + req_host() + req_path()
+    base = app_secret + "+" + consumer_key + "+" + req_method() + "+" + url + "+" + body + "+" + ts
+    signature = "$1$" + sha1_hex(base)
 
-    header_set(ctx, "X-Ovh-Application", app_key)
-    header_set(ctx, "X-Ovh-Consumer", consumer_key)
-    header_set(ctx, "X-Ovh-Timestamp", ts)
-    header_set(ctx, "X-Ovh-Signature", signature)
+    req_set_header("X-Ovh-Application", app_key)
+    req_set_header("X-Ovh-Consumer", consumer_key)
+    req_set_header("X-Ovh-Timestamp", ts)
+    req_set_header("X-Ovh-Signature", signature)
     return True

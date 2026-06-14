@@ -21,22 +21,17 @@
 #   ttl   - token lifetime in seconds (default "3600")
 #   sub   - subject claim; omitted from JWT when empty (default "")
 
-def on_request(ctx):
-    header_json = json_encode({"alg": "RS256", "typ": "JWT"})
-
+def on_request():
     iat = now()
-    exp = iat + int(param(ctx, "ttl", "3600"))
+    exp = iat + int(param("ttl", "3600"))
 
-    claims = {"iss": param(ctx, "iss", ""), "aud": param(ctx, "aud", ""), "iat": iat, "exp": exp}
-    sub = param(ctx, "sub", "")
+    claims = {"iss": param("iss", ""), "aud": param("aud", ""), "iat": iat, "exp": exp}
+    sub = param("sub", "")
     if sub != "":
         claims["sub"] = sub
 
-    claims_json = json_encode(claims)
-
-    signing_input = b64url_encode(header_json) + "." + b64url_encode(claims_json)
-    sig = rs256_sign_b64url(secret(ctx, "private_key"), signing_input)
-    jwt = signing_input + "." + sig
-
-    header_set(ctx, "Authorization", "Bearer " + jwt)
+    # jwt_encode_sign owns the segment assembly (header.claims.signature),
+    # base64url padding, and signing the right bytes -- the JWS footguns.
+    jwt = jwt_encode_sign({"alg": "RS256", "typ": "JWT"}, claims, secret("private_key"))
+    req_set_header("Authorization", "Bearer " + jwt)
     return True

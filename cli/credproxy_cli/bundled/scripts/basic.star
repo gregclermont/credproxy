@@ -5,10 +5,10 @@
 # component equal to the placeholder (password by default, or username) for the
 # real value, re-encode. The auth-scheme token is matched case-insensitively.
 
-def on_request(ctx):
-    header = param(ctx, "header", "Authorization")
-    value = header_get(ctx, header)
-    ph = placeholder(ctx)
+def on_request():
+    header = param("header", "Authorization")
+    value = req_header(header)
+    ph = placeholder()
     if value == None or ph == None:
         return False
     if value[:6].lower() != "basic ":
@@ -19,10 +19,10 @@ def on_request(ctx):
     user = parts[0]
     pw = parts[1]
     if pw == ph:
-        pw = secret(ctx)
+        pw = secret()
     elif user == ph:
-        user = secret(ctx)
+        user = secret()
     else:
         return False
-    header_set(ctx, header, "Basic " + b64encode(user + ":" + pw))
+    req_set_header(header, "Basic " + b64encode(user + ":" + pw))
     return True

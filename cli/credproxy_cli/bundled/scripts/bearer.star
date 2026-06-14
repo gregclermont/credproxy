@@ -8,18 +8,19 @@
 # Reference it from a scripted injector:
 #   scheme = "script"
 #   script = "bearer"
+#   api    = 1
 #   family = "substitute"
 #   slots  = ["value"]
 #   [params]
 #   header = "Authorization"
 
-def on_request(ctx):
-    header = param(ctx, "header", "Authorization")
-    value = header_get(ctx, header)
-    ph = placeholder(ctx)
+def on_request():
+    header = param("header", "Authorization")
+    value = req_header(header)
+    ph = placeholder()
     if value == None or ph == None:
         return False
     if ph not in value:
         return False
-    header_set(ctx, header, value.replace(ph, secret(ctx)))
+    req_set_header(header, value.replace(ph, secret()))
     return True
