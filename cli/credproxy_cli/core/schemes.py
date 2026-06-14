@@ -53,6 +53,16 @@ CATALOG: dict[str, SchemeSpec] = {
     # params; the workspace holds throwaway creds and the proxy re-signs. It
     # rewrites the Authorization header, so it collides there.
     "sigv4":  SchemeSpec("sigv4",  "sign", ("access_key_id", "secret_access_key"), {}),
+    # Re-seal family: OAuth2 client-credentials. The binding is scoped to the
+    # token endpoint; on_request swaps the client_secret placeholder in the body
+    # (so it's "substitute"), on_response mints the returned token as a dynamic
+    # placeholder on `api_hosts` (required param). token_field/expires_field/ttl/
+    # reseal_header tune the response handling.
+    "oauth2-reseal": SchemeSpec(
+        "oauth2-reseal", "substitute", ("value",),
+        {"token_field": "access_token", "expires_field": "expires_in",
+         "ttl": "3600", "reseal_header": "Authorization"},
+        location_kind="body", header_default=None),
 }
 
 

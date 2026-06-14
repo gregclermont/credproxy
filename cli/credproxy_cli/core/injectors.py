@@ -159,13 +159,17 @@ def _parse(path: Path, name: str, source: str) -> Injector:
     if params_raw is not None and not isinstance(params_raw, dict):
         raise InjectorError(f"injector '{name}': [params] must be a table")
     params = merge_params(spec, params_raw)
-    # Param values must be strings (current schemes use only string params,
-    # e.g. `header`); a non-string would silently break injection downstream.
+    # Param values are strings (e.g. `header`) or arrays of strings (e.g. a
+    # re-seal scheme's `api_hosts`); anything else would silently break
+    # injection downstream.
     for pk, pv in params.items():
-        if not isinstance(pv, str):
-            raise InjectorError(
-                f"injector '{name}': params['{pk}'] must be a string"
-            )
+        if isinstance(pv, str):
+            continue
+        if isinstance(pv, list) and all(isinstance(x, str) and x for x in pv):
+            continue
+        raise InjectorError(
+            f"injector '{name}': params['{pk}'] must be a string or array of strings"
+        )
 
     env = raw.get("env")
     if env is not None and (not isinstance(env, str) or not env):

@@ -1,0 +1,32 @@
+# credproxy bundled injector: oauth2-reseal
+#
+# OAuth2 client-credentials RE-SEAL. Scope the binding to the TOKEN ENDPOINT
+# host (--host). On the token request the proxy swaps the client_secret
+# placeholder for the real secret; on the token response it mints the returned
+# access_token as a dynamic placeholder, registers it on `api_hosts`, and
+# rewrites the response so the workspace receives the placeholder. Subsequent
+# requests to api_hosts carry that placeholder, which the proxy swaps for the
+# real (short-lived) token -- so neither the durable client_secret NOR the
+# minted token ever lands in the workspace.
+#
+# `api_hosts` is required and deployment-specific, so COPY this file to
+# $XDG_CONFIG_HOME/credproxy/injectors/ and edit it (a user injector of the same
+# name shadows the bundled one).
+#
+# Bind it with (the durable client_secret is the single "value" slot):
+#   credproxy workspace NAME binding add --injector oauth2-reseal \
+#       --provider env --secret OAUTH_CLIENT_SECRET \
+#       --host login.example.com
+#
+# The workspace sends the generated placeholder where client_secret goes in its
+# token request (see /setup for the placeholder).
+
+scheme = "oauth2-reseal"
+env    = "OAUTH_CLIENT_SECRET"
+
+[params]
+api_hosts     = ["api.example.com"]    # EDIT: hosts where the minted token is used
+token_field   = "access_token"          # JSON field holding the minted token
+expires_field = "expires_in"            # JSON field holding the TTL (seconds)
+ttl           = "3600"                  # fallback TTL when expires_field is absent
+reseal_header = "Authorization"         # header the workspace sends the token in
