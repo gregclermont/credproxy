@@ -133,6 +133,9 @@ def _build_scripted_scheme(entry: dict, source: str, where: str):
     name = entry.get("script")
     if not isinstance(name, str) or not name:
         name = "script"
+    api = entry.get("api", 1)
+    if not isinstance(api, int) or isinstance(api, bool):
+        _fail(f"{source}: {where}.api must be an integer")
     family = entry.get("family")
     if family not in ("substitute", "sign"):
         _fail(f"{source}: {where}.family must be 'substitute' or 'sign'")
@@ -147,9 +150,13 @@ def _build_scripted_scheme(entry: dict, source: str, where: str):
     if header_default is not None and not isinstance(header_default, str):
         _fail(f"{source}: {where}.header_default must be a string or null")
     try:
-        from starlark_runtime import ScriptedScheme
+        from starlark_runtime import SUPPORTED_API_VERSIONS, ScriptedScheme
     except Exception as e:  # pragma: no cover - starlark always present in proxy
         _fail(f"{source}: scripted schemes require the starlark runtime ({e})")
+    if api not in SUPPORTED_API_VERSIONS:
+        _fail(f"{source}: {where} script '{name}' declares api version {api}, "
+              f"unsupported by this proxy (implements "
+              f"{', '.join(str(v) for v in sorted(SUPPORTED_API_VERSIONS))})")
     try:
         # A compile error here is about the host's own script source (no secret
         # is in scope at compile time), so it is safe to surface.

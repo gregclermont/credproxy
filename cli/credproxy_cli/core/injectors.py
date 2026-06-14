@@ -84,6 +84,9 @@ class Injector:
     placeholder: Placeholder
     source: str  # "user" or "bundled"
     script: str | None = None
+    # Primitive-API version a scripted injector targets (declared in the
+    # manifest, pushed on the wire, validated by the proxy). 1 for built-ins.
+    api: int = 1
 
 
 def _placeholder_from(raw: dict, name: str) -> Placeholder:
@@ -130,6 +133,7 @@ def _parse(path: Path, name: str, source: str) -> Injector:
     # location (the CLI can't run Starlark) and names a .star file; built-in
     # schemes get their spec from CATALOG.
     script = None
+    api = 1
     if scheme_name == "script":
         script = raw.get("script")
         if not isinstance(script, str) or not script:
@@ -137,6 +141,9 @@ def _parse(path: Path, name: str, source: str) -> Injector:
                 f"injector '{name}': a scripted injector needs `script` "
                 f"(the .star file name)"
             )
+        api = raw.get("api", 1)
+        if not isinstance(api, int) or isinstance(api, bool):
+            raise InjectorError(f"injector '{name}': `api` must be an integer")
         location_kind = raw.get("location_kind", "header")
         spec = build_script_spec(
             family=raw.get("family"),
@@ -169,6 +176,7 @@ def _parse(path: Path, name: str, source: str) -> Injector:
         scheme=scheme_name,
         spec=spec,
         script=script,
+        api=api,
         params=params,
         env=env,
         placeholder=_placeholder_from(raw, name),

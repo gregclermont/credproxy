@@ -512,6 +512,7 @@ def wire_config(
             # ScriptedScheme. The push model -- proxy stays stateless.
             entry["script"] = injector.script
             entry["script_source"] = find_script(injector.script).source
+            entry["api"] = injector.api
             entry["family"] = spec.family
             entry["slots"] = list(spec.slots)
             entry["location_kind"] = spec.location_kind

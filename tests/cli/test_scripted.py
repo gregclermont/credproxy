@@ -35,7 +35,7 @@ def test_find_bundled_scripts(xdg):
 
 
 def test_user_script_shadows_bundled(xdg):
-    _write_script("bearer", "def on_request(ctx):\n    return True\n")
+    _write_script("bearer", "def on_request():\n    return True\n")
     from credproxy_cli.core.scripts import find_script
 
     s = find_script("bearer")
@@ -80,7 +80,8 @@ def test_bundled_jwt_bearer_injector(xdg):
     assert inj.spec.family == "sign"
     assert inj.spec.slots == ("private_key",)
     assert inj.params["iss"] and inj.params["ttl"]   # [params] parsed
-    assert "rs256_sign_b64url" in find_script("jwt-bearer").source
+    assert inj.api == 1
+    assert "jwt_encode_sign" in find_script("jwt-bearer").source
 
 
 # ---- scripted injector parsing -----------------------------------------------
@@ -148,6 +149,41 @@ def test_scripted_empty_slots(xdg):
         find_injector("bad")
 
 
+def test_scripted_api_version_parsed(xdg):
+    _write_injector("v2signer", """
+        scheme = "script"
+        script = "ovh"
+        api    = 2
+        family = "sign"
+        slots  = ["app_secret"]
+    """)
+    from credproxy_cli.core.injectors import find_injector
+
+    assert find_injector("v2signer").api == 2
+
+
+def test_scripted_default_api_is_one(xdg):
+    _write_injector("noapi", """
+        scheme = "script"
+        script = "bearer"
+        family = "substitute"
+        slots  = ["value"]
+    """)
+    from credproxy_cli.core.injectors import find_injector
+
+    assert find_injector("noapi").api == 1
+
+
+def test_scripted_bad_api_rejected(xdg):
+    _write_injector("badapi",
+                    'scheme="script"\nscript="x"\napi="nope"\nfamily="sign"\nslots=["value"]\n')
+    from credproxy_cli.core.errors import InjectorError
+    from credproxy_cli.core.injectors import find_injector
+
+    with pytest.raises(InjectorError, match="`api` must be an integer"):
+        find_injector("badapi")
+
+
 # ---- wire shape (pushed source) ----------------------------------------------
 
 
@@ -169,6 +205,7 @@ def test_wire_config_scripted_pushes_source(xdg, workspaces_dir):
     assert e["scheme"] == "script"
     assert e["script"] == "bearer"
     assert "def on_request" in e["script_source"]   # the pushed .star body
+    assert e["api"] == 1
     assert e["family"] == "substitute"
     assert e["slots"] == ["value"]
     assert e["location_kind"] == "header"

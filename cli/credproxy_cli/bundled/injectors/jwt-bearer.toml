@@ -21,6 +21,7 @@
 
 scheme         = "script"
 script         = "jwt-bearer"
+api            = 1
 family         = "sign"
 slots          = ["private_key"]
 location_kind  = "header"

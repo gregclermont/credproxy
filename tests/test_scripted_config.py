@@ -82,8 +82,20 @@ def test_scripted_slot_mismatch_rejected():
 def test_scripted_compile_error_rejected():
     with pytest.raises(config.ConfigError, match="failed to compile"):
         config.load_resolved({"bindings": [
-            _script_entry(script_source="def on_request(ctx):\n    this is not valid\n")
+            _script_entry(script_source="def on_request():\n    this is not valid\n")
         ]})
+
+
+def test_scripted_unsupported_api_rejected():
+    """A script declaring an api version this proxy doesn't implement is
+    rejected before it runs (the forward-compat seam)."""
+    with pytest.raises(config.ConfigError, match="unsupported by this proxy"):
+        config.load_resolved({"bindings": [_script_entry(api=99)]})
+
+
+def test_scripted_bad_api_type_rejected():
+    with pytest.raises(config.ConfigError, match="api must be an integer"):
+        config.load_resolved({"bindings": [_script_entry(api="two")]})
 
 
 def test_scripted_sign_family_needs_no_placeholder():
