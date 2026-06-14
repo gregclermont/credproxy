@@ -1,0 +1,19 @@
+# credproxy bundled injector: ovh
+#
+# OVH API request signing. Computes the four OVH signature headers
+# (X-Ovh-Application, X-Ovh-Consumer, X-Ovh-Timestamp, X-Ovh-Signature) from
+# three credential slots. Sign-family: no placeholder is needed; the proxy adds
+# the headers to every matching request before forwarding.
+#
+# Bind it with:
+#   credproxy workspace NAME binding add --injector ovh --provider env \
+#       --secret app_key=OVH_APP_KEY \
+#       --secret app_secret=OVH_APP_SECRET \
+#       --secret consumer_key=OVH_CONSUMER_KEY \
+#       --host eu.api.ovh.com
+
+scheme         = "script"
+script         = "ovh"
+family         = "sign"
+slots          = ["app_key", "app_secret", "consumer_key"]
+location_kind  = "header"

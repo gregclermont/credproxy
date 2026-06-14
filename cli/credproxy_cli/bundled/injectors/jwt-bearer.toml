@@ -1,0 +1,32 @@
+# credproxy bundled injector: jwt-bearer
+#
+# Self-signed JWT bearer assertion (RS256). The proxy mints a fresh JWT on
+# every intercepted request, signed with an RSA private key sourced from the
+# provider, and sets Authorization: Bearer <jwt>. The private key never transits
+# the wire. Covers GCP service-account direct auth and RFC 7523 private-key
+# JWT assertions accepted by other APIs.
+#
+# Single slot: "private_key" (PEM-encoded RSA private key). Because it is NOT
+# named "value", you must name the slot explicitly when binding:
+#
+#   credproxy workspace NAME binding add \
+#       --injector jwt-bearer \
+#       --provider <provider> \
+#       --secret private_key=<REF> \
+#       --host api.example.com
+#
+# To customize iss/aud/ttl, copy this injector to
+# $XDG_CONFIG_HOME/credproxy/injectors/ and edit [params] (a user injector of
+# the same name shadows the bundled one).
+
+scheme         = "script"
+script         = "jwt-bearer"
+family         = "sign"
+slots          = ["private_key"]
+location_kind  = "header"
+
+[params]
+iss = "my-service@example.com"
+aud = "https://api.example.com/token"
+ttl = "3600"
+# sub = ""          # optional subject claim; leave empty to omit from JWT

@@ -54,7 +54,33 @@ def test_list_scripts_includes_bundled(xdg):
     from credproxy_cli.core.scripts import list_scripts
 
     names = [s.name for s in list_scripts()]
-    assert {"bearer", "basic", "body"} <= set(names)
+    assert {"bearer", "basic", "body", "ovh", "jwt-bearer"} <= set(names)
+
+
+# ---- bundled scripted injectors (ovh, jwt-bearer) parse + resolve ------------
+
+
+def test_bundled_ovh_injector(xdg):
+    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.scripts import find_script
+
+    inj = find_injector("ovh")
+    assert inj.scheme == "script" and inj.script == "ovh"
+    assert inj.spec.family == "sign"
+    assert inj.spec.slots == ("app_key", "app_secret", "consumer_key")
+    assert "def on_request" in find_script("ovh").source
+
+
+def test_bundled_jwt_bearer_injector(xdg):
+    from credproxy_cli.core.injectors import find_injector
+    from credproxy_cli.core.scripts import find_script
+
+    inj = find_injector("jwt-bearer")
+    assert inj.scheme == "script" and inj.script == "jwt-bearer"
+    assert inj.spec.family == "sign"
+    assert inj.spec.slots == ("private_key",)
+    assert inj.params["iss"] and inj.params["ttl"]   # [params] parsed
+    assert "rs256_sign_b64url" in find_script("jwt-bearer").source
 
 
 # ---- scripted injector parsing -----------------------------------------------
