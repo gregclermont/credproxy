@@ -24,7 +24,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
-from .errors import ConfigError
+from .errors import ConfigError, CredproxyError
 from .injectors import Injector, find_injector
 from .providers import fetch_many as provider_fetch_many
 from .schemes import location_key
@@ -173,6 +173,15 @@ def validate(bindings: list[Binding], source: str) -> None:
         # injector + provider must exist (raises InjectorError/ProviderError).
         injector = find_injector(b.injector)
         find_provider(b.provider)
+        # A scripted injector names a .star file; resolve it now so a missing
+        # or mistyped script is caught here (add/apply time) rather than going
+        # unnoticed until the proxy compiles it at push.
+        if injector.scheme == "script" and injector.script:
+            from .scripts import find_script
+            try:
+                find_script(injector.script)
+            except CredproxyError as e:
+                raise ConfigError(f"{source}: binding '{b.name}': {e}")
         spec = injector.spec
 
         # secret slots must match the scheme's declared slots.
@@ -456,6 +465,7 @@ class BindingTestResult:
     ok: bool
     value_len: int | None   # length of the fetched secret on success
     error: str | None       # error message on failure
+    note: str | None = None  # advisory (e.g. scripted injector: script resolved)
 
 
 def test_binding(
@@ -466,7 +476,22 @@ def test_binding(
     revealing the secret values (only their total length). Resolves every slot
     in one batch invocation. Never raises a provider error -- it is captured
     into the result so callers can report per-binding in a batch."""
-    from .errors import CredproxyError
+    # For a scripted injector, confirm the named .star resolves. The proxy
+    # compiles it at push time; host-side we can at least prove it exists, so a
+    # passing `binding test` doesn't falsely imply a missing script is fine.
+    note = None
+    if binding.injector:
+        try:
+            inj = find_injector(binding.injector)
+        except CredproxyError as e:
+            return BindingTestResult(binding.name, False, None, str(e))
+        if inj.scheme == "script" and inj.script:
+            from .scripts import find_script
+            try:
+                find_script(inj.script)
+                note = f"script '{inj.script}' resolved (not compiled)"
+            except CredproxyError as e:
+                return BindingTestResult(binding.name, False, None, str(e))
 
     refs = secret_refs(binding)
     try:
@@ -476,7 +501,7 @@ def test_binding(
     # Sum over distinct fetched values, not per-slot, so a ref shared by two
     # slots is counted once.
     total = sum(len(v) for v in values.values())
-    return BindingTestResult(binding.name, True, total, None)
+    return BindingTestResult(binding.name, True, total, None, note)
 
 
 # ---- wire mapping (push path) -----------------------------------------------

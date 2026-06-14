@@ -430,6 +430,9 @@ def _do_binding_preset(ctx: Ctx, name: str | None, a: argparse.Namespace) -> Non
             fail(f"binding name '{b.name}' already exists in workspace '{ws.name}'")
     core_bindings.validate(existing + new, str(ws.config_path))
     core_bindings.append_bindings(ws, new)   # one atomic write
+    # A preset expands to several bindings; say so up front so the multiple
+    # `added binding` lines that follow aren't a surprise.
+    say(f"preset '{a.preset}' expands to {len(new)} bindings:")
     for b in new:
         render.OUT.binding_added(b.name, ws.name, {
             "name": b.name,
@@ -503,6 +506,7 @@ def do_binding_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
             "ok": r.ok,
             "value_len": r.value_len,
             "error": r.error,
+            "note": r.note,
         })
     render.OUT.binding_test(results)
     if any_fail:
@@ -544,6 +548,7 @@ def _do_binding_test_adhoc(ctx: Ctx, name: str | None, a: argparse.Namespace) ->
         "ok": r.ok,
         "value_len": r.value_len,
         "error": r.error,
+        "note": r.note,
     }])
     if not r.ok:
         sys.exit(1)
@@ -562,11 +567,25 @@ def do_scaffold(ctx: Ctx, kind: str, name: str) -> None:
 def do_def_list(ctx: Ctx, kind: str) -> None:
     if kind == "injector":
         from ..core.injectors import list_injectors
-        rows = [{"name": d.name, "source": d.source} for d in list_injectors()]
+        rows = [
+            {
+                "name": d.name,
+                "scheme": d.scheme if d.scheme != "script"
+                else f"script:{d.spec.family}",
+                "source": d.source,
+            }
+            for d in list_injectors()
+        ]
     else:
         from ..core.providers import list_providers
         rows = [{"name": d.name, "source": d.source} for d in list_providers()]
     render.OUT.def_list(kind, rows)
+
+
+def do_preset_list(ctx: Ctx) -> None:
+    from ..core.presets import describe_presets
+
+    render.OUT.preset_list(describe_presets())
 
 
 # ---- dev harness -------------------------------------------------------------
@@ -737,8 +756,9 @@ _STRICT_HELP = (
     "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
     "Definitions:\n"
-    "  credproxy injector scaffold NAME | injector list\n"
+    "  credproxy injector scaffold NAME [--script] | injector list | check NAME\n"
     "  credproxy provider scaffold NAME | provider list\n"
+    "  credproxy preset list               (coordinated multi-binding sets)\n"
     "Dev harness:\n"
     "  credproxy dev build|test|reload\n"
     "\n"
@@ -763,14 +783,147 @@ _LOOSE_HELP = (
     "  credp binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
     "Definitions:\n"
-    "  credp injector scaffold NAME | injector list\n"
+    "  credp injector scaffold NAME [--script] | injector list | check NAME\n"
     "  credp provider scaffold NAME | provider list\n"
+    "  credp preset list               (coordinated multi-binding sets)\n"
     "Dev harness:\n"
     "  credp dev build|test|reload\n"
     "\n"
     "The canonical `credproxy workspace NAME <verb>` forms work too and are the\n"
     "scriptable contract. Global flags: --json, --yes (bypass confirmation)."
 )
+
+
+# Per-command help. The leaf parsers are deliberately `add_help=False` (we don't
+# want raw argparse usage spew), so `--help` is honored by the hand-rolled
+# dispatch via these prose blocks instead.
+_BINDING_ADD_HELP = (
+    "credproxy workspace NAME binding add -- bind a credential into requests\n"
+    "for one or more hosts. Give exactly ONE of --injector or --preset.\n"
+    "\n"
+    "  --injector INJ    single binding: how the credential is shaped into the\n"
+    "                    request (bearer, basic, body, sigv4, ...).\n"
+    "                    See `credproxy injector list`.\n"
+    "  --preset PRESET   a coordinated multi-binding set (e.g. github expands to\n"
+    "                    three bindings sharing one token). The preset owns\n"
+    "                    name/placeholder/env/host. See `credproxy preset list`.\n"
+    "  --provider PROV   where the value comes from (REQUIRED).\n"
+    "                    See `credproxy provider list`.\n"
+    "  --secret REF      the reference the provider resolves. For the `env`\n"
+    "                    provider REF is the host env var NAME (not the value).\n"
+    "                    Repeat as SLOT=REF for a multi-slot secret.\n"
+    "  --host HOST       host this binding applies to; repeatable. Required\n"
+    "                    with --injector (the preset sets its own hosts).\n"
+    "  --name NAME       binding name (auto: <injector>-<provider>[-N]).\n"
+    "  --placeholder PH  inert sentinel swapped for the real value at egress\n"
+    "                    (auto-generated for substitute schemes).\n"
+    "  --env VAR         env var name exposed to the workspace via /setup.\n"
+)
+
+_BINDING_TEST_HELP = (
+    "credproxy workspace NAME binding test [BINDING] -- dry-run resolve binding\n"
+    "secrets via their providers. Reports ok/length per binding (never the\n"
+    "secret value); exits 1 if any fail.\n"
+    "\n"
+    "  BINDING                       test only this binding (default: all).\n"
+    "  --provider P --secret REF [--injector I]\n"
+    "                                ad-hoc: test a definition before it is\n"
+    "                                bound (no workspace needed).\n"
+)
+
+_CREATE_HELP = (
+    "credproxy workspace create NAME [--image IMG] -- scaffold a workspace\n"
+    "config file and auth token. Does not start anything.\n"
+    "\n"
+    "  NAME         the workspace name (required).\n"
+    "  --image IMG  workspace container image (default: "
+    f"{DEFAULT_WORKSPACE_IMAGE}).\n"
+)
+
+
+def _wants_help(argv: list[str]) -> bool:
+    """True if argv contains a help flag. Used by the hand-rolled dispatch to
+    honor `-h`/`--help` on subcommands (the leaf argparse parsers suppress it)."""
+    return any(t in ("-h", "--help") for t in argv)
+
+
+def _scaffold_help(kind: str) -> str:
+    s = (
+        f"credproxy {kind} scaffold NAME -- copy the bundled {kind} template "
+        f"into\nyour registry as NAME, to author from. NAME must not start "
+        f"with '-'."
+    )
+    if kind == "injector":
+        s += (
+            "\n\n--script [sign|substitute]  instead emit a SCRIPTED (custom) "
+            "injector:\n  a manifest + a .star carrying the primitive-API "
+            "reference inline.\n  Use this when no built-in scheme fits; check "
+            "it with `injector check NAME`."
+        )
+    s += f"\nThen `credproxy {kind} list` shows it."
+    return s
+
+
+# What each workspace-scoped verb does, surfaced on `... NAME <verb> --help`.
+# Kept terse but descriptive: the blind-agent rounds showed a bare `usage:`
+# line for the lifecycle verbs read as "is this command even doing anything?".
+_VERB_HELP = {
+    "enter": (
+        "credproxy workspace NAME enter [--user USER] [-- CMD...] -- open a shell\n"
+        "(default bash, or run CMD) in the workspace, starting it first if needed.\n"
+        "  --user USER   run as USER for this session (overrides config `user`)."
+    ),
+    "start": (
+        "credproxy workspace NAME start -- (re)start the proxy, wait for health,\n"
+        "push the resolved bindings, then (re)start the workspace. Creates the\n"
+        "containers if missing; recreates one whose spec (image/mounts/env/...)\n"
+        "has drifted. Safe to re-run."
+    ),
+    "stop": (
+        "credproxy workspace NAME stop -- stop both containers (kept, not removed).\n"
+        "Config and state survive; a later `start`/`enter` resumes."
+    ),
+    "delete": (
+        "credproxy workspace NAME delete -- remove both containers, the home\n"
+        "volume, the config file, and the state dir. Not reversible. (On the loose\n"
+        "surface, deleting the default workspace prompts first.)"
+    ),
+    "apply": (
+        "credproxy workspace NAME apply -- reconcile a running workspace with its\n"
+        "config: binding changes are re-pushed live; container-spec changes\n"
+        "(image/home/mounts/env/setup) are deferred with a `start` hint. Reports\n"
+        "what was applied vs deferred."
+    ),
+    "inspect": (
+        "credproxy workspace NAME inspect -- show config, running state, host port,\n"
+        "binding summary, and any drift against what was last applied."
+    ),
+    "edit": (
+        "credproxy workspace NAME edit -- open the config in $VISUAL/$EDITOR\n"
+        "(default vi), then validate it. Sugar over editing the .toml directly;\n"
+        "hints `apply`/`start` afterward."
+    ),
+    "logs": (
+        "credproxy workspace NAME logs -- follow the proxy container's logs\n"
+        "(docker logs -f)."
+    ),
+}
+
+
+def _verb_help(verb_argv: list[str]) -> str:
+    """Contextual help for a workspace-scoped verb (`--help` on the leaf)."""
+    verb = verb_argv[0] if verb_argv else ""
+    if verb == "binding":
+        sub = verb_argv[1] if len(verb_argv) > 1 and not verb_argv[1].startswith("-") else ""
+        if sub == "add":
+            return _BINDING_ADD_HELP
+        if sub == "test":
+            return _BINDING_TEST_HELP
+        return ("credproxy workspace NAME binding {add|remove|list|test} ...\n"
+                "Run `binding add --help` or `binding test --help` for details.")
+    if verb in _VERB_HELP:
+        return _VERB_HELP[verb]
+    return f"usage: credproxy workspace NAME {verb}"
 
 
 def _split_trailing(argv: list[str]) -> tuple[list[str], list[str]]:
@@ -814,6 +967,9 @@ def _dispatch_workspace(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:
     head = rest[0]
 
     if head == "create":
+        if _wants_help(rest):
+            say(_CREATE_HELP)
+            return
         a = _parse_create(rest[1:])
         do_create(ctx, a.name, a.image)
         return
@@ -843,6 +999,9 @@ def _run_ws_verb(
 ) -> None:
     """Parse and run a workspace-scoped verb. `verb_argv` starts with the
     verb. `name` is the (possibly None) explicit workspace name."""
+    if _wants_help(verb_argv):
+        say(_verb_help(verb_argv))
+        return
     a = _build_leaf_parser().parse_args(verb_argv)
     verb = a.verb
     if verb == "enter":
@@ -899,6 +1058,9 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
         do_use(ctx, rest[0])
         return
     if head == "create":
+        if _wants_help(rest):
+            say(_CREATE_HELP)
+            return
         a = _parse_create(rest)
         do_create(ctx, a.name, a.image)
         return
@@ -953,6 +1115,8 @@ def main(loose_default: bool = False) -> None:
             _dispatch_meta(ctx, head, rest)
         elif head in ("injector", "provider"):
             _dispatch_def(ctx, head, rest)
+        elif head == "preset":
+            _dispatch_preset(ctx, rest)
         elif head == "dev":
             _dispatch_dev(ctx, rest, trailing)
         elif loose:
@@ -976,21 +1140,182 @@ def _dispatch_meta(ctx: Ctx, head: str, rest: list[str]) -> None:
 
 
 def _dispatch_def(ctx: Ctx, kind: str, rest: list[str]) -> None:
-    if not rest:
-        fail(f"usage: credproxy {kind} {{scaffold NAME|list}}")
-    if rest[0] == "scaffold":
-        if len(rest) != 2:
-            fail(f"usage: credproxy {kind} scaffold NAME")
-        do_scaffold(ctx, kind, rest[1])
-    elif rest[0] == "list":
+    sub = rest[0] if rest else None
+
+    if sub == "scaffold":
+        args = rest[1:]
+        # Honor --help BEFORE treating the next token as a NAME -- otherwise
+        # `scaffold --help` would scaffold a file literally named '--help'.
+        if _wants_help(args):
+            say(_scaffold_help(kind))
+            return
+        name, script_mode, family = _parse_scaffold_args(kind, args)
+        if script_mode:
+            if kind != "injector":
+                fail("--script is only valid for `injector scaffold`")
+            do_scaffold_script(ctx, name, family)
+        else:
+            do_scaffold(ctx, kind, name)
+        return
+
+    if sub == "check" and kind == "injector":
+        args = rest[1:]
+        if _wants_help(args) or not args:
+            say("usage: credproxy injector check NAME [--compile]\n"
+                "Validate a scripted injector host-side (manifest parses and the\n"
+                "named .star resolves); --compile additionally compiles the .star\n"
+                "in the proxy image (needs docker + the built image).")
+            return
+        names = [a for a in args if not a.startswith("-")]
+        flags = [a for a in args if a.startswith("-")]
+        bad = [f for f in flags if f != "--compile"]
+        if bad or len(names) != 1:
+            fail("usage: credproxy injector check NAME [--compile]")
+        do_injector_check(ctx, names[0], "--compile" in flags)
+        return
+
+    if sub == "list":
         do_def_list(ctx, kind)
-    else:
-        fail(f"unknown {kind} command '{rest[0]}'")
+        return
+
+    usage = (
+        "usage: credproxy injector {scaffold NAME [--script [sign|substitute]]"
+        "|list|check NAME}"
+        if kind == "injector"
+        else f"usage: credproxy {kind} {{scaffold NAME|list}}"
+    )
+    if _wants_help(rest):
+        say(usage)
+        return
+    if not rest:
+        fail(usage)
+    fail(f"unknown {kind} command '{rest[0]}'")
+
+
+def _parse_scaffold_args(kind: str, args: list[str]) -> tuple[str, bool, str]:
+    """Parse `scaffold` args: a NAME plus an optional
+    `--script [sign|substitute]` (default family: sign)."""
+    name: str | None = None
+    script_mode = False
+    family = "sign"
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok == "--script":
+            script_mode = True
+            if i + 1 < len(args) and args[i + 1] in ("sign", "substitute"):
+                family = args[i + 1]
+                i += 1
+        elif tok.startswith("-"):
+            fail(f"unknown flag {tok!r}; usage: credproxy {kind} scaffold "
+                 f"NAME [--script [sign|substitute]]")
+        elif name is None:
+            name = tok
+        else:
+            fail(f"usage: credproxy {kind} scaffold NAME")
+        i += 1
+    if name is None:
+        fail(f"usage: credproxy {kind} scaffold NAME [--script [sign|substitute]]")
+    return name, script_mode, family
+
+
+def do_scaffold_script(ctx: Ctx, name: str, family: str) -> None:
+    from ..core.scaffold import scaffold_script
+
+    r = scaffold_script(name, family)
+    render.OUT.scaffolded_script(
+        r.name, str(r.injector_path), str(r.script_path), r.family)
+
+
+def do_injector_check(ctx: Ctx, name: str, do_compile: bool) -> None:
+    from ..core.injectors import find_injector
+    from ..core.scripts import find_script
+
+    inj = find_injector(name)  # parses + validates the manifest (raises if bad)
+    if inj.scheme != "script":
+        render.OUT.injector_check(name, {
+            "scheme": inj.scheme, "scripted": False, "ok": True,
+            "detail": f"built-in scheme '{inj.scheme}'; nothing to compile"})
+        return
+    script = find_script(inj.script)  # raises InjectorError if missing
+    detail = (f"manifest ok (family={inj.spec.family}, "
+              f"slots={list(inj.spec.slots)}); script '{inj.script}' "
+              f"resolves ({script.source_origin})")
+    if not do_compile:
+        render.OUT.injector_check(name, {
+            "scheme": "script", "scripted": True, "ok": True,
+            "compiled": False, "detail": detail})
+        return
+    err = _compile_script_in_image(script.source)
+    render.OUT.injector_check(name, {
+        "scheme": "script", "scripted": True, "ok": err is None,
+        "compiled": True, "detail": detail, "compile_error": err})
+    if err is not None:
+        sys.exit(1)
+
+
+def _compile_script_in_image(source: str) -> str | None:
+    """Compile a `.star` in the proxy image (which carries the Starlark runtime),
+    so the host needs no starlark dep. Returns None on success, else the error
+    text. Mirrors what the proxy does at push time. Needs docker + the image."""
+    import os
+    import subprocess
+    import tempfile
+    from ..core.paths import IMAGE_TAG
+
+    pycode = (
+        "import sys\n"
+        "from starlark_runtime import ScriptedScheme\n"
+        "src = open('/work/check.star').read()\n"
+        "try:\n"
+        "    ScriptedScheme(name='check', source=src, filename='check.star')\n"
+        "except Exception as e:\n"
+        "    print('%s: %s' % (type(e).__name__, e)); sys.exit(1)\n"
+        "print('ok')\n"
+    )
+    with tempfile.TemporaryDirectory() as d:
+        os.chmod(d, 0o755)
+        p = os.path.join(d, "check.star")
+        with open(p, "w") as f:
+            f.write(source)
+        os.chmod(p, 0o644)
+        cmd = ["docker", "run", "--rm", "-v", f"{d}:/work:ro"]
+        # Prefer the live proxy source when the repo is checked out (parity with
+        # `dev test`), so a `dev build`-stale image doesn't give wrong verdicts;
+        # otherwise the baked image's runtime is the contract.
+        if PROXY_DIR.is_dir():
+            cmd += ["-v", f"{PROXY_DIR}:/opt/proxy:ro"]
+        cmd += ["-w", "/opt/proxy", "--entrypoint", "python", IMAGE_TAG,
+                "-c", pycode]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True)
+        except FileNotFoundError:
+            fail("`injector check --compile` needs docker (not found on PATH)")
+    out = (r.stdout + r.stderr).strip()
+    if r.returncode == 0:
+        return None
+    if "Unable to find image" in out or "No such image" in out:
+        fail(f"proxy image '{IMAGE_TAG}' not found; build it with "
+             f"`credproxy dev build`")
+    return out or f"compile failed (exit {r.returncode})"
+
+
+def _dispatch_preset(ctx: Ctx, rest: list[str]) -> None:
+    # One subcommand (`list`); a bare `preset` or `--help` also lists, since the
+    # listing is the documentation. Anything else is a usage error.
+    if not rest or _wants_help(rest) or rest[0] == "list":
+        do_preset_list(ctx)
+        return
+    fail(f"unknown preset command '{rest[0]}' (usage: credproxy preset list)")
 
 
 def _dispatch_dev(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:
+    usage = "usage: credproxy dev {build|test|reload}"
+    if _wants_help(rest):
+        say(usage)
+        return
     if not rest:
-        fail("usage: credproxy dev {build|test|reload}")
+        fail(usage)
     sub = rest[0]
     if sub == "build":
         do_dev_build(ctx)

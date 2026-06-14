@@ -12,9 +12,9 @@ Schema:
   setup  = ["npm ci"]                  # list[str], optional; run once on create
 
   [[binding]]                          # zero or more; see core/bindings.py
-  injector = "github"
-  provider = "vault"
-  secret   = "github/pat"
+  injector = "bearer"
+  provider = "env"
+  secret   = "GITHUB_TOKEN"
   hosts    = ["api.github.com"]
 
 The `[[binding]]` array is parsed/validated/materialized by core/bindings.py,
@@ -37,7 +37,7 @@ import tomllib
 # Required: image (defaulted). Everything else is optional / commented out.
 CONFIG_TEMPLATE = """\
 # credproxy workspace config.
-# Edit this file, then run `credproxy start {name}` to apply.
+# Edit this file, then run `credproxy workspace {name} start` to apply.
 
 # Workspace image. Changing this (or mounts/env/setup) recreates the
 # workspace container on the next `start`.
@@ -80,11 +80,12 @@ image = "{image}"
 # into a request) to a provider (where the value comes from), scoped to one
 # or more hosts. The real secret never enters the workspace -- the proxy
 # swaps the placeholder for the real value on requests to these hosts.
-# Add them with `credproxy binding add`, or uncomment and edit:
+# Add them with `credproxy binding add` (or `--preset NAME` for a coordinated
+# set like github -- see `credproxy preset list`), or uncomment and edit:
 # [[binding]]
-# injector = "github"            # cli/credproxy_cli/bundled/injectors/
-# provider = "env"               # cli/credproxy_cli/bundled/providers/
-# secret   = "GITHUB_TOKEN"      # opaque, interpreted by the provider
+# injector = "bearer"            # a scheme; see `credproxy injector list`
+# provider = "env"               # a value source; see `credproxy provider list`
+# secret   = "GITHUB_TOKEN"      # ref the provider resolves (env: a host env var name)
 # hosts    = ["api.github.com"]
 # name + placeholder + env are auto-generated; override here if needed.
 """

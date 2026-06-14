@@ -75,7 +75,8 @@ def get_scheme(name: str) -> SchemeSpec:
     if spec is None:
         raise InjectorError(
             f"unknown scheme {name!r}; known schemes: "
-            f"{', '.join(sorted(CATALOG))}"
+            f"{', '.join(sorted(CATALOG))} -- or use scheme=\"script\" for a "
+            f"custom injector (`credproxy injector scaffold NAME --script`)"
         )
     return spec
 

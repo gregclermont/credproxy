@@ -202,9 +202,10 @@ class Renderer:
     def binding_test(self, results: list[dict]) -> None:
         for r in results:
             if r["ok"]:
+                extra = f"; {r['note']}" if r.get("note") else ""
                 print(
                     f"ok    {r['name']}  (provider {r['provider']}, "
-                    f"value length {r['value_len']})"
+                    f"value length {r['value_len']}{extra})"
                 )
             else:
                 print(f"FAIL  {r['name']}  (provider {r['provider']}): {r['error']}")
@@ -214,11 +215,51 @@ class Renderer:
         if not rows:
             print(f"no {kind}s")
             return
-        header = ("NAME", "SOURCE")
-        table = [header] + [(r["name"], r["source"]) for r in rows]
-        w = max(len(row[0]) for row in table)
+        # Injectors carry a SCHEME column (so scripted injectors are visible as
+        # such); providers don't. Lay out whatever columns the rows have.
+        if any("scheme" in r for r in rows):
+            cols = ("NAME", "SCHEME", "SOURCE")
+            table = [cols] + [(r["name"], r.get("scheme", ""), r["source"]) for r in rows]
+        else:
+            cols = ("NAME", "SOURCE")
+            table = [cols] + [(r["name"], r["source"]) for r in rows]
+        widths = [max(len(row[i]) for row in table) for i in range(len(cols))]
         for row in table:
-            print(f"{row[0]:<{w}}  {row[1]}")
+            print("  ".join(f"{row[i]:<{widths[i]}}" for i in range(len(cols))).rstrip())
+
+    # -- scripted-injector scaffold / check --
+    def scaffolded_script(self, name: str, injector_path: str,
+                          script_path: str, family: str) -> None:
+        print(f"scaffolded scripted injector '{name}' (family {family}):")
+        print(f"  manifest  {injector_path}")
+        print(f"  script    {script_path}")
+        print(f"edit the script, then: credproxy injector check {name}")
+
+    def injector_check(self, name: str, info: dict) -> None:
+        status = "ok  " if info["ok"] else "FAIL"
+        print(f"{status}  injector '{name}': {info['detail']}")
+        if info.get("compiled"):
+            if info["ok"]:
+                print("  compiled cleanly in the proxy image")
+            else:
+                print(f"  compile error: {info['compile_error']}")
+        elif info.get("scripted"):
+            print("  (run with --compile to compile the .star in the proxy image)")
+
+    # -- preset list --
+    def preset_list(self, rows: list[dict]) -> None:
+        if not rows:
+            print("no presets")
+            return
+        print("Coordinated multi-binding sets. Use with:")
+        print("  credproxy workspace NAME binding add --preset NAME "
+              "--provider P --secret REF")
+        for p in rows:
+            print(f"\n{p['name']}  ({len(p['bindings'])} bindings)")
+            for b in p["bindings"]:
+                env = f"  env {b['env']}" if b.get("env") else ""
+                hosts = ", ".join(b["hosts"])
+                print(f"  {b['name']:<14} {b['injector']:<7} {hosts}{env}")
 
 
 class JsonRenderer(Renderer):
@@ -289,6 +330,17 @@ class JsonRenderer(Renderer):
 
     def def_list(self, kind: str, rows: list[dict]) -> None:
         self._emit(rows)
+
+    def preset_list(self, rows: list[dict]) -> None:
+        self._emit(rows)
+
+    def scaffolded_script(self, name: str, injector_path: str,
+                          script_path: str, family: str) -> None:
+        self._emit({"name": name, "injector_path": injector_path,
+                    "script_path": script_path, "family": family})
+
+    def injector_check(self, name: str, info: dict) -> None:
+        self._emit({"name": name, **info})
 
 
 # Active renderer, installed by set_format() in main().

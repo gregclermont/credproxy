@@ -47,6 +47,27 @@ PRESETS: dict[str, PresetSpec] = {
 }
 
 
+def describe_presets() -> list[dict]:
+    """Structured description of every known preset, for `preset list`: each
+    preset's name and the bindings it expands to (suffix/injector/hosts/env).
+    No secret/provider -- those are supplied at `binding add` time."""
+    return [
+        {
+            "name": spec.name,
+            "bindings": [
+                {
+                    "name": f"{spec.name}-{part.suffix}",
+                    "injector": part.injector,
+                    "hosts": list(part.hosts),
+                    "env": part.env,
+                }
+                for part in spec.parts
+            ],
+        }
+        for spec in sorted(PRESETS.values(), key=lambda s: s.name)
+    ]
+
+
 def build_preset(preset: str, provider: str, secret: str) -> list[Binding]:
     """Generate the binding set for `preset`, all sharing one freshly-generated
     placeholder and resolving the same single-slot `secret` ref via `provider`.
