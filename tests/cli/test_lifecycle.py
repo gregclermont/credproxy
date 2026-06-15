@@ -93,6 +93,24 @@ def test_workspace_disables_selinux_labeling(xdg, ws_factory, monkeypatch):
     assert args[args.index("--security-opt") + 1] == "label=disable"
 
 
+def test_run_flags_spliced_before_structural_flags(xdg, ws_factory, monkeypatch):
+    """run_flags are spliced into `docker run` ahead of credproxy's structural
+    flags (--name, --network), so docker's last-wins parsing keeps credproxy in
+    control of the netns and container name."""
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": [],
+           "run_flags": ["--userns=keep-id:uid=1000,gid=1000"]}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    args = calls[-1]
+    assert "--userns=keep-id:uid=1000,gid=1000" in args
+    # escape-hatch flag precedes --name and --network (credproxy wins on conflict)
+    assert args.index("--userns=keep-id:uid=1000,gid=1000") < args.index("--name")
+    assert args.index("--userns=keep-id:uid=1000,gid=1000") < args.index("--network")
+
+
 # ---- _compute_drift: no applied record = in sync ----------------------------
 
 
@@ -126,6 +144,39 @@ def test_drift_image_changed(xdg, workspaces_dir):
     assert c.kind == "container"
     assert c.applied == "old_image"
     assert c.configured == "new_image"
+
+
+def test_drift_run_flags_changed(xdg, workspaces_dir):
+    """Adding run_flags drifts against an applied spec that had none (the
+    pre-run_flags spec normalizes a missing field to [], so this is also the
+    backward-compat case)."""
+    from credproxy_cli.core.lifecycle import _compute_drift
+
+    ws = _write_ws(workspaces_dir, "drf")
+    _write_applied_spec(ws)  # no run_flags key -> treated as []
+
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": [],
+           "run_flags": ["--userns=keep-id"]}
+    report = _compute_drift(ws, cfg, [], running=True)
+
+    assert not report.in_sync
+    c = next(c for c in report.changes if c.item == "run_flags")
+    assert c.kind == "container"
+    assert c.applied == []
+    assert c.configured == ["--userns=keep-id"]
+
+
+def test_drift_no_run_flags_is_in_sync(xdg, workspaces_dir):
+    """A workspace with no run_flags and a pre-run_flags applied spec is in sync
+    (no false-positive drift from the missing field)."""
+    from credproxy_cli.core.lifecycle import _compute_drift
+
+    ws = _write_ws(workspaces_dir, "drf2")
+    _write_applied_spec(ws)  # no run_flags key
+
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": []}
+    report = _compute_drift(ws, cfg, [], running=True)
+    assert report.in_sync is True
 
 
 def test_drift_env_added(xdg, workspaces_dir):

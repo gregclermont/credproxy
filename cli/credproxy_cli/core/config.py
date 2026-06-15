@@ -10,6 +10,7 @@ Schema:
   mounts = ["~/src:/src"]              # list[str] "SRC:DST" or "SRC:DST:ro"
   env    = { KEY = "value" }           # table, optional; passed as -e to ws
   setup  = ["npm ci"]                  # list[str], optional; run once on create
+  run_flags = ["--userns=keep-id"]     # list[str], optional; spliced into docker run
 
   [[binding]]                          # zero or more; see core/bindings.py
   injector = "bearer"
@@ -55,6 +56,13 @@ image = "{image}"
 # Escape hatch: extra flags spliced into `docker exec` for `enter`
 # (e.g. a working dir or env). credproxy keeps control of -i/-t/-d. Exec-only.
 # exec_flags = ["--workdir", "/srv"]
+
+# Escape hatch: extra flags spliced into the workspace `docker run`. Unlike
+# exec_flags these shape the container, so changing them recreates it on the
+# next `start`. credproxy's --name/labels/--network/home volume win on conflict.
+# Useful for runtime-specific uid mapping so a non-root `user` can write bind
+# mounts without changing host ownership, e.g. on rootless podman:
+# run_flags = ["--userns=keep-id:uid=1000,gid=1000"]
 
 # Host paths bind-mounted into the workspace. Each entry is
 # "SRC:DST" or "SRC:DST:ro"; ~ is expanded on SRC.
@@ -194,6 +202,17 @@ def load_config(ws: Workspace) -> dict:
     if not isinstance(exec_flags, list) or not all(isinstance(f, str) for f in exec_flags):
         raise ConfigError(f"{ws.config_path}: `exec_flags` must be an array of strings")
 
+    # run_flags: escape hatch -- extra flags spliced into the workspace
+    # `docker run` (e.g. ["--userns=keep-id:uid=1000,gid=1000"] for rootless
+    # podman, or a custom idmapped mount). Unlike `exec_flags`, these shape the
+    # container itself, so they ARE part of the spec hash: changing them
+    # recreates the container on the next `start`. credproxy's structural flags
+    # (--name, labels, --network, the home volume) are applied AFTER these and
+    # win on conflict, so run_flags can't detach the netns or rename the box.
+    run_flags = raw.get("run_flags") or []
+    if not isinstance(run_flags, list) or not all(isinstance(f, str) for f in run_flags):
+        raise ConfigError(f"{ws.config_path}: `run_flags` must be an array of strings")
+
     return {
         "image": image,
         "home": home,
@@ -202,6 +221,7 @@ def load_config(ws: Workspace) -> dict:
         "setup": setup,
         "user": user,
         "exec_flags": exec_flags,
+        "run_flags": run_flags,
     }
 
 
@@ -216,8 +236,8 @@ def quick_image(ws: Workspace) -> str:
 
 def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
     """Identity of the workspace container's launch spec. Changing the
-    image, home, mounts, env, setup, or the proxy container (netns peer)
-    yields a new hash, which `start` uses to decide whether to recreate."""
+    image, home, mounts, env, setup, run_flags, or the proxy container (netns
+    peer) yields a new hash, which `start` uses to decide whether to recreate."""
     spec = json.dumps(
         {
             "image": cfg["image"],
@@ -225,6 +245,7 @@ def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
             "mounts": cfg["mounts"],
             "env": cfg["env"],
             "setup": cfg["setup"],
+            "run_flags": cfg.get("run_flags") or [],
             "proxy": proxy_id,
         },
         sort_keys=True,

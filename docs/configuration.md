@@ -90,12 +90,13 @@ hosts    = ["sts.amazonaws.com"]
 | `mounts` | list of strings | `[]` | Each entry is `"SRC:DST"` or `"SRC:DST:ro"`. `~` is expanded on `SRC`; `SRC` must be an existing absolute path, `DST` must be absolute. `:ro` makes the mount read-only. |
 | `env` | table (string → string) | `{}` | Passed to the container as `-e KEY=VALUE`. Both keys and values must be strings. |
 | `setup` | list of strings | `[]` | Shell commands run **once**, right after the container is (re)created, via `sh -lc`. A failing command stops `start` and leaves the container in place for debugging. Re-run only happens when the container is recreated (see drift below), not on every `start`. |
+| `run_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the workspace `docker run`. credproxy's structural flags (`--name`, labels, `--network`, the home volume) are applied **after** these and win on conflict, so `run_flags` can't detach the netns or rename the container; additive flags (`--userns`, an extra `--mount`/`-v`, `--security-opt`) take effect. The main use is runtime-specific uid mapping (see *Non-root user & mount ownership* below). |
 | `auto_stop` | bool | `false` | When `true`, the workspace stops once the last `enter` session exits. Read fresh at session end, so toggling it mid-session takes effect immediately. A stopped workspace is resumed automatically by the next `enter`. |
 
-Changing `image`, `home`, `mounts`, `env`, or `setup` is **container-spec
-drift**: it requires recreating the workspace container, which happens on the
-next `start` (the home volume is preserved). Editing bindings does **not**
-require a recreate — see below.
+Changing `image`, `home`, `mounts`, `env`, `setup`, or `run_flags` is
+**container-spec drift**: it requires recreating the workspace container, which
+happens on the next `start` (the home volume is preserved). Editing bindings
+does **not** require a recreate — see below.
 
 ### Exec settings
 
@@ -110,6 +111,30 @@ These shape how `enter` runs commands in the container; they are **exec-only**
 
 `setup` runs as root regardless of `user`, so it is the place to provision a
 non-root user (create it, grant sudo, chown its home).
+
+### Non-root user & mount ownership
+
+Running the workspace as a non-root `user` (above) and bind-mounting host
+directories into it runs into a runtime-specific ownership problem, and there is
+no single portable flag for it — rootful and rootless runtimes have opposite uid
+models. credproxy never changes host-file ownership to paper over this; instead
+you pick the right lever per runtime via `run_flags`. In every case the host
+bytes and ownership are left untouched.
+
+- **Rootful Docker / Docker Desktop (macOS):** container uid `N` == host uid `N`.
+  Create the non-root user with `uid:gid` equal to the host owner's (in `setup`,
+  e.g. `useradd -u 1000 -g 1000 dev`) and the bind mounts are writable as that
+  user. (On Docker Desktop the file share is usually permissive already, so this
+  often just works.) No `run_flags` needed.
+- **Rootless Podman (Linux):** the user namespace maps your host uid to container
+  **root**, so a non-root user can't write the mounts by default. Map your host
+  uid onto the container user with
+  `run_flags = ["--userns=keep-id:uid=1000,gid=1000"]` (create `dev` as uid 1000
+  in `setup`). Both the bind mounts and the home volume then line up. A
+  per-mount `-v SRC:DST:idmap` is the finer-grained alternative.
+
+`run_flags` is part of the container spec, so changing it recreates the
+workspace on the next `start`.
 
 ### Bindings
 

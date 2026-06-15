@@ -66,6 +66,7 @@ def _write_applied_spec(ws: Workspace, cfg: dict, proxy_id: str | None) -> None:
         "mounts": cfg["mounts"],
         "env": cfg["env"],
         "setup": cfg["setup"],
+        "run_flags": cfg.get("run_flags") or [],
         "proxy_id": proxy_id,
     }
     ws.applied_spec_path.write_text(json.dumps(spec, indent=2) + "\n")
@@ -168,6 +169,12 @@ def create_ws_container(
 ) -> None:
     args = [
         "run", "-d",
+        # Escape hatch first, so credproxy's structural flags below (--name,
+        # labels, --network, home volume) are applied AFTER and win on conflict
+        # (docker last-wins parsing). A stray --network/--name in run_flags thus
+        # can't detach the netns or rename the box; additive flags (--userns,
+        # extra --mount/-v, --security-opt) still take effect.
+        *(cfg.get("run_flags") or []),
         "--name", ws.ws_container,
         "--label", "credproxy.role=workspace",
         "--label", f"credproxy.workspace={ws.name}",
@@ -501,6 +508,16 @@ def _compute_drift(
                 item="mounts",
                 applied=applied_mounts,
                 configured=configured_mounts,
+            ))
+        # run_flags: list of strings (missing in pre-run_flags specs -> [])
+        configured_run_flags = cfg.get("run_flags") or []
+        applied_run_flags = applied_spec.get("run_flags") or []
+        if configured_run_flags != applied_run_flags:
+            changes.append(DriftItem(
+                kind="container",
+                item="run_flags",
+                applied=applied_run_flags,
+                configured=configured_run_flags,
             ))
 
     # ---- bindings drift ----
