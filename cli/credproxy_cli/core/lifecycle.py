@@ -189,7 +189,12 @@ def create_ws_container(
         if m["readonly"]:
             opt += ",readonly"
         args += ["--mount", opt]
-    # env vars from config
+    # Self-config breadcrumb: a tenant (e.g. an agent) that inspects its
+    # environment finds the inward setup surface proactively, without first
+    # having to trip a TLS-interception error and investigate it. Points at the
+    # agent-facing guidance; /etc/hosts already resolves proxy.local.
+    args += ["-e", "CREDPROXY_SETUP=http://proxy.local/llms.txt"]
+    # env vars from config (after the breadcrumb, so a user could override it)
     for k, v in cfg.get("env", {}).items():
         args += ["-e", f"{k}={v}"]
     # `tail -f /dev/null` keeps the container alive to `exec` into; the
