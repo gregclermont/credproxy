@@ -195,6 +195,58 @@ def test_jwt_bearer_each_call_is_fresh():
 
 
 # ---------------------------------------------------------------------------
+# Placeholder gate: when the binding declares a placeholder, mint ONLY for
+# requests that carry it (per-request opt-in + multi-identity disambiguation).
+# ---------------------------------------------------------------------------
+
+def _ctx_with_placeholder(pem: str, placeholder, authorization=None):
+    req = tutils.treq(host="api.example.com")
+    req.headers.clear()
+    req.headers["host"] = "api.example.com"
+    if authorization is not None:
+        req.headers["Authorization"] = authorization
+    ctx = schemes.RequestCtx(
+        req,
+        {"private_key": pem},
+        {"iss": "svc@example.com", "aud": "https://api.example.com", "ttl": "60"},
+        placeholder,
+    )
+    return ctx, req
+
+
+def test_jwt_bearer_placeholder_present_mints():
+    """Workspace presents the placeholder bearer -> real JWT is minted in place."""
+    key, pem = _make_key()
+    s = _make_scheme()
+    ctx, req = _ctx_with_placeholder(pem, "PLACEHOLDER-TOKEN",
+                                     authorization="Bearer PLACEHOLDER-TOKEN")
+    assert s.on_request(ctx) is True
+    auth = req.headers["Authorization"]
+    assert auth.startswith("Bearer ")
+    assert auth != "Bearer PLACEHOLDER-TOKEN"          # placeholder replaced
+    assert len(auth[len("Bearer "):].split(".")) == 3  # by a real 3-part JWT
+
+
+def test_jwt_bearer_placeholder_absent_skips():
+    """No Authorization header -> not our request; leave it untouched."""
+    key, pem = _make_key()
+    s = _make_scheme()
+    ctx, req = _ctx_with_placeholder(pem, "PLACEHOLDER-TOKEN", authorization=None)
+    assert s.on_request(ctx) is False
+    assert "Authorization" not in req.headers
+
+
+def test_jwt_bearer_placeholder_mismatch_skips():
+    """A different token (another identity) -> not ours; leave it untouched."""
+    key, pem = _make_key()
+    s = _make_scheme()
+    ctx, req = _ctx_with_placeholder(pem, "PLACEHOLDER-TOKEN",
+                                     authorization="Bearer SOMEONE-ELSES-TOKEN")
+    assert s.on_request(ctx) is False
+    assert req.headers["Authorization"] == "Bearer SOMEONE-ELSES-TOKEN"
+
+
+# ---------------------------------------------------------------------------
 # Signature is invalid when verified with a DIFFERENT key (sanity check)
 # ---------------------------------------------------------------------------
 

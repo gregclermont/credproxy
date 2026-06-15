@@ -2,8 +2,11 @@
 #
 # OVH API request signing. Computes the four OVH signature headers
 # (X-Ovh-Application, X-Ovh-Consumer, X-Ovh-Timestamp, X-Ovh-Signature) from
-# three credential slots. Sign-family: no placeholder is needed; the proxy adds
-# the headers to every matching request before forwarding.
+# three credential slots. Sign-family: by default no placeholder is needed and
+# the proxy adds the headers to every matching request. Optionally set a
+# `placeholder` on the binding (the workspace then presents it as the
+# X-Ovh-Application header): the proxy signs only requests carrying it, which
+# enables per-request opt-in and running several OVH identities on one host.
 #
 # Bind it with:
 #   credproxy workspace NAME binding add --injector ovh --provider env \
