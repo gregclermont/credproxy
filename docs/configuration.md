@@ -101,7 +101,8 @@ hosts    = ["sts.amazonaws.com"]
 | `env` | table (string → string) | `{}` | Passed to the container as `-e KEY=VALUE`. Both keys and values must be strings. |
 | `setup` | list of strings | `[]` | Shell commands run **once**, right after the container is (re)created, via `sh -lc`. A failing command stops `start` and leaves the container in place for debugging. Re-run only happens when the container is recreated (see drift below), not on every `start`. |
 | `run_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the workspace `docker run`. credproxy's structural flags (`--name`, labels, `--network`, the home volume) are applied **after** these and win on conflict, so `run_flags` can't detach the netns or rename the container; additive flags (`--userns`, an extra `--mount`/`-v`, `--security-opt`) take effect. The main use is runtime-specific uid mapping (see *Non-root user & mount ownership* below). |
-| `map_host_user` | bool | `false` | Make the non-root `user` own your bind mounts without changing host ownership. credproxy picks the runtime-appropriate lever automatically (`--userns=keep-id` on rootless podman; a no-op on Docker, where the matching uid does it). **No-op unless `user` is set.** The managed alternative to a hand-written `--userns` in `run_flags`; don't set both. See *Non-root user & mount ownership* below. |
+| `map_host_user` | bool | `false` | Make the non-root `user` own your bind mounts without changing host ownership. credproxy picks the runtime-appropriate lever automatically (`--userns=keep-id` on rootless podman; a no-op on Docker, where the matching uid does it). **Requires `user`** (error otherwise). The managed alternative to a hand-written `--userns` in `run_flags` — and if you set both, the `run_flags` one wins (escape hatch overrides the knob). See *Non-root user & mount ownership* below. |
+| `user_uid` | int | host uid | The in-container uid of `user` — the uid `map_host_user`'s keep-id maps your host uid **onto** (rootless podman). Host uid and this need not be equal; keep-id maps across them. Defaults to your host uid (correct for a `setup`-provisioned user made as `$CREDPROXY_HOST_UID`); set it to a baked user's uid (the default image's `vscode` is `1000`, which the scaffold fills in). **Requires `user`** (error otherwise). Only consumed with `map_host_user` on rootless podman. |
 | `auto_stop` | bool | `false` | When `true`, the workspace stops once the last `enter` session exits. Read fresh at session end, so toggling it mid-session takes effect immediately. A stopped workspace is resumed automatically by the next `enter`. |
 
 Changing `image`, `home`, `mounts`, `env`, `setup`, `run_flags`, or
@@ -137,34 +138,60 @@ are left untouched.
 
 Every workspace gets `CREDPROXY_HOST_UID` / `CREDPROXY_HOST_GID` in its
 environment — the uid/gid the CLI runs as, i.e. the owner of your bind-mounted
-project dirs. That single value is the canonical "workspace uid" on both
-runtimes.
+project dirs. It's the value to match a `setup`-created user to
+(`useradd -u $CREDPROXY_HOST_UID`).
 
-### The easy path: `map_host_user`
+#### The mental model
 
-Set `map_host_user = true` and create the user in `setup` matched to that uid:
+The workspace `user` runs as some uid **inside** the container — call it
+`user_uid`. For it to read/write your bind mounts (owned on the host by you,
+`CREDPROXY_HOST_UID`), your host identity has to map to `user_uid` inside. **How**
+that mapping works — and **whether the host uid and `user_uid` may differ** —
+depends on the runtime:
 
+- **Rootless podman:** `map_host_user` adds `--userns=keep-id:uid=<user_uid>`,
+  which maps **your host uid onto `user_uid`**. The two **need not be equal** —
+  keep-id maps *across* them — so a baked `vscode` (uid 1000) works even when your
+  host uid is 501. credproxy just needs to know `user_uid` (it defaults to your
+  host uid; the scaffold sets `1000` for the default image).
+- **Rootful Docker (Linux):** container uid **==** host uid — no remapping, no
+  keep-id. So here `user_uid` **must equal** your host uid for the mounts to line
+  up, and `map_host_user` is a no-op. You match them by creating the user as
+  `$CREDPROXY_HOST_UID`; the baked `vscode` (1000) lines up **only** at host uid
+  1000.
+- **Docker Desktop (macOS):** the file share is permissive — uid doesn't matter,
+  it just works.
+- **Rootless Docker:** no `keep-id` equivalent — **not covered**; you'd need
+  idmapped bind mounts.
+
+So `user_uid` is the one knob, and it bites in exactly one place: it's the
+in-container uid that keep-id targets on rootless podman. Set it wrong and the
+mount shows up owned by the wrong uid inside (keep-id maps host-you onto *exactly*
+that uid). `map_host_user` and `user_uid` are part of the container spec, so
+changing either recreates the workspace on the next `start`. The host files are
+never chowned in any case.
+
+#### Supplying `user_uid`
+
+**A baked user with a known uid** (the default image's `vscode` is `1000`) — tell
+credproxy the uid; host uid and the user's uid then differ freely (podman):
+```toml
+user = "vscode"
+user_uid = 1000          # the scaffold fills this in for the default image
+map_host_user = true
+mounts = ["~/code:/code"]
+```
+
+**A user you create in `setup`** — give it your host uid, and omit `user_uid`
+(it defaults to the host uid, which then matches on podman *and* rootful Docker):
 ```toml
 user = "dev"
 map_host_user = true
 mounts = ["~/code:/code"]
-setup = [
-  "useradd -u $CREDPROXY_HOST_UID -m dev || true",
-]
+setup = ["useradd -u $CREDPROXY_HOST_UID -m dev || true"]
 ```
 
-This single config works **unchanged across runtimes** — credproxy detects the
-runtime and applies the right lever: on rootless podman it adds
-`--userns=keep-id:uid=…,gid=…` (mapping your uid onto `dev`); on Docker it adds
-nothing, because the matching uid from `setup` already lines up 1:1. The host
-files are never chowned. `map_host_user` is part of the container spec, so
-toggling it recreates the workspace on the next `start`.
-
-(Caveat: `map_host_user` covers Docker, Docker Desktop, and rootless **podman**.
-Rootless **Docker** has no `keep-id` equivalent and is not covered — there you'd
-need idmapped bind mounts.)
-
-### The manual path: `run_flags`
+#### The manual path: `run_flags`
 
 If you'd rather own the user namespace yourself (or need a non-default mapping),
 skip `map_host_user` and write the flag directly:
@@ -176,8 +203,12 @@ skip `map_host_user` and write the flag directly:
   var, so use the same literal uid in both.) A per-mount `-v SRC:DST:idmap` is the
   finer-grained alternative.
 
-Don't combine `map_host_user` with a `--userns` in `run_flags` — pick one owner
-of the user namespace.
+To just change which in-container uid the mapping targets, prefer `user_uid` (above)
+— `run_flags` is for a genuinely custom userns (an explicit `--uidmap`, multiple
+ranges, etc.). If you set **both** `map_host_user` and a `--userns` in `run_flags`,
+the `run_flags` one wins — `run_flags` is the escape hatch and overrides the
+convenience knob (it's spliced after credproxy's `keep-id`, but still before the
+structural flags, so it can't touch the netns).
 
 ### Bindings
 

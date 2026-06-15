@@ -147,6 +147,51 @@ def test_map_host_user_injects_keepid_on_podman_rootless(xdg, ws_factory, monkey
     assert args.index(flag) < args.index("--name")
 
 
+def test_map_host_user_keepid_targets_user_uid(xdg, ws_factory, monkeypatch):
+    """keep-id's uid is the user's in-container uid (user_uid), NOT the host uid,
+    so host uid != user uid lines up (e.g. vscode=1000 on a host with uid 501)."""
+    import os
+    if not hasattr(os, "getuid"):
+        import pytest
+        pytest.skip("no getuid on this platform")
+    from credproxy_cli.core import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": [],
+           "user": "vscode", "map_host_user": True, "user_uid": 1000}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    args = calls[-1]
+    assert f"--userns=keep-id:uid=1000,gid={os.getgid()}" in args
+
+
+def test_run_flags_userns_overrides_map_host_user(xdg, ws_factory, monkeypatch):
+    """A --userns in run_flags wins over map_host_user's keep-id (escape hatch
+    beats the knob): run_flags is spliced AFTER keep-id, but both stay before
+    the structural flags so the netns is still protected."""
+    import os
+    if not hasattr(os, "getuid"):
+        import pytest
+        pytest.skip("no getuid on this platform")
+    from credproxy_cli.core import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": [],
+           "user": "vscode", "map_host_user": True,
+           "run_flags": ["--userns=keep-id:uid=1000,gid=1000"]}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    args = calls[-1]
+    keepid = f"--userns=keep-id:uid={os.getuid()},gid={os.getgid()}"
+    override = "--userns=keep-id:uid=1000,gid=1000"
+    # both present; run_flags override comes AFTER keep-id (docker last-wins)
+    assert args.index(override) > args.index(keepid)
+    # ...but still before the structural flags (netns protected)
+    assert args.index(override) < args.index("--network")
+
+
 def test_map_host_user_noop_on_docker(xdg, ws_factory, monkeypatch):
     """map_host_user on a non-podman-rootless runtime injects nothing."""
     from credproxy_cli.core import lifecycle
@@ -625,6 +670,15 @@ def test_effective_config_resolves_shell(xdg):
     from credproxy_cli.core.lifecycle import effective_config, DEFAULT_ENTER_CMD
     assert effective_config({"home": "/h"})["shell"] == DEFAULT_ENTER_CMD
     assert effective_config({"home": "/h", "shell": ["zsh"]})["shell"] == ["zsh"]
+
+
+def test_effective_config_resolves_user_uid(xdg):
+    """user_uid -> the host uid (keep-id target) when unset, explicit when set."""
+    import os
+    from credproxy_cli.core.lifecycle import effective_config
+    if hasattr(os, "getuid"):
+        assert effective_config({"home": "/h"})["user_uid"] == os.getuid()
+    assert effective_config({"home": "/h", "user_uid": 1000})["user_uid"] == 1000
 
 
 def test_run_setup_runs_every_call(xdg, ws_factory, monkeypatch):

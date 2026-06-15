@@ -69,6 +69,7 @@ def _write_applied_spec(ws: Workspace, cfg: dict, proxy_id: str | None) -> None:
         "setup": cfg["setup"],
         "run_flags": cfg.get("run_flags") or [],
         "map_host_user": bool(cfg.get("map_host_user")),
+        "user_uid": cfg.get("user_uid"),
         "proxy_id": proxy_id,
     }
     ws.applied_spec_path.write_text(json.dumps(spec, indent=2) + "\n")
@@ -172,10 +173,16 @@ def _host_user_run_flags(cfg: dict) -> list[str]:
 
     Only rootless podman needs a lever: there the userns maps host-you to
     container-root, so a non-root user can't write the mounts; --userns=keep-id
-    maps your uid/gid onto the container user instead. On Docker (uids 1:1) and
-    when map_host_user is off this is a no-op -- the matching uid via
-    CREDPROXY_HOST_UID handles Docker. Returns [] unless the runtime actually
-    needs it, so the same config stays portable across runtimes.
+    maps your host uid/gid onto the workspace user instead. On Docker (uids 1:1)
+    and when map_host_user is off this is a no-op. Returns [] unless the runtime
+    actually needs it, so the same config stays portable across runtimes.
+
+    The keep-id `uid` is the workspace user's IN-CONTAINER uid -- that's the side
+    of the map host-you must land on for the user to own the mounts. It comes
+    from `user_uid` if set (e.g. the default image's `vscode` is uid 1000),
+    otherwise it falls back to the host uid (correct for a user provisioned in
+    `setup` as $CREDPROXY_HOST_UID). host uid and the user's uid may differ
+    freely -- keep-id maps across them; they need not be equal.
 
     A no-op without a non-root `user`: the default root workspace already owns
     the mounts on every runtime, so there is nothing to map (and we skip the
@@ -186,7 +193,10 @@ def _host_user_run_flags(cfg: dict) -> list[str]:
     from .runtime import is_podman_rootless
     if not is_podman_rootless():
         return []
-    return [f"--userns=keep-id:uid={os.getuid()},gid={os.getgid()}"]
+    uid = cfg.get("user_uid")
+    if uid is None:
+        uid = os.getuid()
+    return [f"--userns=keep-id:uid={uid},gid={os.getgid()}"]
 
 
 def create_ws_container(
@@ -194,16 +204,19 @@ def create_ws_container(
 ) -> None:
     args = [
         "run", "-d",
-        # Escape hatch first, so credproxy's structural flags below (--name,
-        # labels, --network, home volume) are applied AFTER and win on conflict
-        # (docker last-wins parsing). A stray --network/--name in run_flags thus
-        # can't detach the netns or rename the box; additive flags (--userns,
-        # extra --mount/-v, --security-opt) still take effect.
-        *(cfg.get("run_flags") or []),
-        # credproxy-managed userns mapping (map_host_user); after run_flags so
-        # it wins over a user-supplied --userns -- map_host_user means "let
-        # credproxy own the user namespace".
+        # credproxy-managed userns mapping (map_host_user) goes FIRST, so a
+        # user-supplied --userns in run_flags below overrides it (docker
+        # last-wins). run_flags is the escape hatch and beats the convenience
+        # knob -- mirroring how exec_flags overrides config user/workdir on
+        # `enter`. Safe to let run_flags win here because the user namespace is
+        # orthogonal to the shared netns (--network container:..., below).
         *_host_user_run_flags(cfg),
+        # Escape hatch: after keep-id (so it can override it) but BEFORE
+        # credproxy's structural flags below (--name, labels, --network, home
+        # volume), which are applied last and win on conflict -- so a stray
+        # --network/--name in run_flags still can't detach the netns or rename
+        # the box. Additive flags (extra --mount/-v, --security-opt) just apply.
+        *(cfg.get("run_flags") or []),
         "--name", ws.ws_container,
         "--label", "credproxy.role=workspace",
         "--label", f"credproxy.workspace={ws.name}",
@@ -577,6 +590,14 @@ def _compute_drift(
                 applied=applied_map,
                 configured=configured_map,
             ))
+        # user_uid: optional int (missing in older specs -> None)
+        if cfg.get("user_uid") != applied_spec.get("user_uid"):
+            changes.append(DriftItem(
+                kind="container",
+                item="user_uid",
+                applied=applied_spec.get("user_uid"),
+                configured=cfg.get("user_uid"),
+            ))
 
     # ---- bindings drift ----
     if applied_bindings is None:
@@ -935,6 +956,11 @@ def effective_config(cfg: dict) -> dict:
     ep = cfg.get("enter_prelude")
     out["enter_prelude"] = DEFAULT_ENTER_PRELUDE if ep is None else ep
     out["shell"] = list(cfg.get("shell") or DEFAULT_ENTER_CMD)
+    # user_uid defaults to the host uid (the keep-id target when unset)
+    uid = cfg.get("user_uid")
+    if uid is None and hasattr(os, "getuid"):
+        uid = os.getuid()
+    out["user_uid"] = uid
     return out
 
 

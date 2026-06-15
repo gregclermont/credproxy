@@ -306,6 +306,7 @@ def test_render_template_default_image_wires_nonroot_user(xdg, workspaces_dir):
     assert cfg["user"] == DEFAULT_WORKSPACE_USER
     assert cfg["home"] == DEFAULT_WORKSPACE_USER_HOME
     assert cfg["map_host_user"] is True
+    assert cfg["user_uid"] == 1000          # vscode's uid, so keep-id targets it
 
 
 def test_render_template_custom_image_keeps_user_commented(xdg, workspaces_dir):
@@ -609,7 +610,7 @@ def test_load_config_map_host_user(xdg, workspaces_dir):
     from credproxy_cli.core.config import load_config
     from credproxy_cli.core.workspace import Workspace
 
-    _write(workspaces_dir, "m", 'image = "alpine:3"\nmap_host_user = true\n')
+    _write(workspaces_dir, "m", 'image = "alpine:3"\nuser = "dev"\nmap_host_user = true\n')
     assert load_config(Workspace("m"))["map_host_user"] is True
 
 
@@ -637,3 +638,65 @@ def test_spec_hash_changes_on_map_host_user(xdg):
     base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     assert workspace_spec_hash(base, "p") == workspace_spec_hash({**base, "map_host_user": False}, "p")
     assert workspace_spec_hash(base, "p") != workspace_spec_hash({**base, "map_host_user": True}, "p")
+
+
+def test_spec_hash_changes_on_user_uid(xdg):
+    """user_uid shapes the userns -> changing it changes the spec hash."""
+    from credproxy_cli.core.config import workspace_spec_hash
+
+    base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
+    assert workspace_spec_hash(base, "p") != workspace_spec_hash({**base, "user_uid": 1000}, "p")
+
+
+def test_load_config_user_uid(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "u", 'image = "alpine:3"\nuser = "vscode"\nuser_uid = 1000\n')
+    assert load_config(Workspace("u"))["user_uid"] == 1000
+
+
+def test_load_config_user_uid_default_none(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "ud", 'image = "alpine:3"\n')
+    assert load_config(Workspace("ud"))["user_uid"] is None
+
+
+def test_load_config_user_uid_invalid(xdg, workspaces_dir):
+    from credproxy_cli.core.config import ConfigError, load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    for bad in ('user_uid = -1', 'user_uid = "1000"', 'user_uid = true'):
+        _write(workspaces_dir, "b", f'image = "alpine:3"\nuser = "dev"\n{bad}\n')
+        with pytest.raises(ConfigError, match="`user_uid` must be a non-negative integer"):
+            load_config(Workspace("b"))
+
+
+def test_map_host_user_requires_user(xdg, workspaces_dir):
+    from credproxy_cli.core.config import ConfigError, load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nmap_host_user = true\n')
+    with pytest.raises(ConfigError, match="`map_host_user` require[s]? `user`"):
+        load_config(Workspace("b"))
+
+
+def test_user_uid_requires_user(xdg, workspaces_dir):
+    from credproxy_cli.core.config import ConfigError, load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nuser_uid = 1000\n')
+    with pytest.raises(ConfigError, match="`user_uid` require[s]? `user`"):
+        load_config(Workspace("b"))
+
+
+def test_both_orphans_named_in_error(xdg, workspaces_dir):
+    """Both offenders are named when both are set without `user`."""
+    from credproxy_cli.core.config import ConfigError, load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nmap_host_user = true\nuser_uid = 1000\n')
+    with pytest.raises(ConfigError, match="`map_host_user` and `user_uid` require `user`"):
+        load_config(Workspace("b"))

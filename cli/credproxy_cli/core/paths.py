@@ -101,4 +101,5 @@ DEFAULT_WORKSPACE = "default"
 DEFAULT_WORKSPACE_IMAGE = "mcr.microsoft.com/devcontainers/base:ubuntu"
 DEFAULT_WORKSPACE_USER = "vscode"
 DEFAULT_WORKSPACE_USER_HOME = "/home/vscode"
+DEFAULT_WORKSPACE_USER_UID = 1000  # the devcontainers `vscode` user's uid
 DEFAULT_HOME = "/root"  # generic fallback when `home` is omitted (custom images)

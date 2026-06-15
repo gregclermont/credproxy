@@ -12,6 +12,7 @@ Schema:
   setup  = ["npm ci"]                  # list[str], optional; run once on create
   run_flags = ["--userns=keep-id"]     # list[str], optional; spliced into docker run
   map_host_user = true                 # bool, optional; non-root `user` owns mounts
+  user_uid = 1000                      # int, optional; in-container uid of `user`
   user   = "dev"                       # str, optional; user `enter` execs as
   shell  = ["zsh"]                     # list[str], optional; default `enter` command
   workdir = "/code"                    # str, optional; dir `enter` starts in
@@ -40,6 +41,7 @@ from .paths import (
     DEFAULT_WORKSPACE_IMAGE,
     DEFAULT_WORKSPACE_USER,
     DEFAULT_WORKSPACE_USER_HOME,
+    DEFAULT_WORKSPACE_USER_UID,
 )
 
 import tomllib
@@ -70,10 +72,17 @@ image = "{image}"
 # ownership on the host. credproxy picks the runtime-appropriate lever:
 # --userns=keep-id on rootless podman; on Docker the matching uid does it
 # (the default `vscode` is uid 1000; on a custom image create the user as
-# $CREDPROXY_HOST_UID in `setup`). No-op unless `user` is set. Recreates the
-# container on change. Don't combine with a --userns in run_flags -- pick one
-# owner of the user namespace.
+# $CREDPROXY_HOST_UID in `setup`). Requires `user`. Recreates the container on
+# change. A --userns in run_flags overrides this (run_flags is the escape hatch
+# and wins), so you can hand-tune the mapping without unsetting it.
 {map_line}
+
+# The in-container uid of `user` -- the side map_host_user's keep-id maps your
+# host uid onto, so it's what `user` must be for the mapping to line up. Host
+# uid and this need not be equal. Defaults to your host uid (right for a user
+# made as $CREDPROXY_HOST_UID in `setup`); set it to a baked user's uid (the
+# default image's `vscode` is 1000). Recreates the container on change.
+{user_uid_line}
 
 # Command `enter` runs when you don't pass `-- CMD` (argv list). Defaults to a
 # login shell, `["bash", "-l"]` -- entering the workspace is like logging in, so
@@ -284,10 +293,38 @@ def load_config(ws: Workspace) -> dict:
     # without changing host ownership, picking the runtime-appropriate lever
     # (--userns=keep-id on rootless podman; a no-op on Docker, where the matching
     # uid via CREDPROXY_HOST_UID handles it). Shapes the container -> part of the
-    # spec hash. Meaningful only with a non-root `user`; a no-op otherwise.
+    # spec hash. Requires a non-root `user` (validated below).
     map_host_user = raw.get("map_host_user", False)
     if not isinstance(map_host_user, bool):
         raise ConfigError(f"{ws.config_path}: `map_host_user` must be a boolean")
+
+    # user_uid: the in-container uid of `user`. map_host_user's keep-id maps
+    # host-you onto THIS uid, so it's the side the host must land on for `user`
+    # to own the bind mounts (host uid and this need not be equal). Defaults to
+    # the host uid (correct for a `setup`-provisioned user made as
+    # $CREDPROXY_HOST_UID); set it to a baked user's uid (the default image's
+    # `vscode` is 1000). Shapes the container -> part of the spec hash.
+    user_uid = raw.get("user_uid")
+    if user_uid is not None and (not isinstance(user_uid, int) or isinstance(user_uid, bool)
+                                 or user_uid < 0):
+        raise ConfigError(f"{ws.config_path}: `user_uid` must be a non-negative integer")
+
+    # map_host_user / user_uid configure how the non-root `user` owns bind
+    # mounts, so they're meaningless without one. Reject rather than silently
+    # no-op -- a uid (or mapping toggle) for a non-existent user is a config
+    # error, not an in-progress state worth tolerating.
+    if user is None:
+        orphans = [name for name, present in
+                   (("map_host_user", map_host_user), ("user_uid", user_uid is not None))
+                   if present]
+        if orphans:
+            joined = " and ".join(f"`{o}`" for o in orphans)
+            verb, subj = ("require", "they") if len(orphans) > 1 else ("requires", "it")
+            raise ConfigError(
+                f"{ws.config_path}: {joined} {verb} `user` to be set "
+                f"({subj} configure{'' if len(orphans) > 1 else 's'} how the "
+                f"non-root `user` owns bind mounts)"
+            )
 
     return {
         "image": image,
@@ -302,6 +339,7 @@ def load_config(ws: Workspace) -> dict:
         "exec_flags": exec_flags,
         "run_flags": run_flags,
         "map_host_user": map_host_user,
+        "user_uid": user_uid,
     }
 
 
@@ -330,8 +368,8 @@ def quick_image(ws: Workspace) -> str:
 
 def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
     """Identity of the workspace container's launch spec. Changing the
-    image, home, mounts, env, setup, run_flags, map_host_user, or the proxy
-    container (netns peer) yields a new hash, which `start` uses to decide
+    image, home, mounts, env, setup, run_flags, map_host_user, user_uid, or the
+    proxy container (netns peer) yields a new hash, which `start` uses to decide
     whether to recreate."""
     spec = json.dumps(
         {
@@ -342,6 +380,7 @@ def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
             "setup": cfg["setup"],
             "run_flags": cfg.get("run_flags") or [],
             "map_host_user": bool(cfg.get("map_host_user")),
+            "user_uid": cfg.get("user_uid"),
             "proxy": proxy_id,
         },
         sort_keys=True,
@@ -359,6 +398,7 @@ def render_template(name: str, image: str) -> str:
         home_line = f'home = "{DEFAULT_WORKSPACE_USER_HOME}"'
         user_line = f'user = "{DEFAULT_WORKSPACE_USER}"'
         map_line = "map_host_user = true"
+        user_uid_line = f"user_uid = {DEFAULT_WORKSPACE_USER_UID}"
         # The default image has curl + update-ca-certificates, so the proxy CA
         # can be installed automatically -- HTTPS interception works right after
         # `enter`, no manual bootstrap. Runs as root on each (re)create.
@@ -374,6 +414,7 @@ def render_template(name: str, image: str) -> str:
         home_line = '# home = "/root"'
         user_line = '# user = "dev"'
         map_line = "# map_host_user = true"
+        user_uid_line = "# user_uid = 1000"
         # Unknown image: leave setup commented. If it has curl +
         # update-ca-certificates, add the CA bootstrap so interception works.
         setup_block = (
@@ -388,5 +429,5 @@ def render_template(name: str, image: str) -> str:
         )
     return CONFIG_TEMPLATE.format(
         name=name, image=image, home_line=home_line, user_line=user_line,
-        map_line=map_line, setup_block=setup_block,
+        map_line=map_line, user_uid_line=user_uid_line, setup_block=setup_block,
     )
