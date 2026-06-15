@@ -93,6 +93,39 @@ def test_workspace_disables_selinux_labeling(xdg, ws_factory, monkeypatch):
     assert args[args.index("--security-opt") + 1] == "label=disable"
 
 
+def test_host_uid_gid_injected_into_workspace_env(xdg, ws_factory, monkeypatch):
+    """The workspace gets CREDPROXY_HOST_UID/GID (= the CLI's uid/gid) so setup
+    can match a non-root user to the bind-mount owner without host chowns."""
+    import os
+    if not hasattr(os, "getuid"):
+        import pytest
+        pytest.skip("no getuid on this platform")
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": []}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    args = calls[-1]
+    assert f"CREDPROXY_HOST_UID={os.getuid()}" in args
+    assert f"CREDPROXY_HOST_GID={os.getgid()}" in args
+
+
+def test_config_env_overrides_host_uid_breadcrumb(xdg, ws_factory, monkeypatch):
+    """A user's `env` is applied after the breadcrumbs, so it wins (last -e)."""
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {"CREDPROXY_HOST_UID": "999"},
+           "setup": []}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    args = calls[-1]
+    # the override comes after the breadcrumb in argv -> docker last-wins
+    e_indices = [i for i, a in enumerate(args) if a == "CREDPROXY_HOST_UID=999"]
+    assert e_indices and e_indices[-1] > args.index("-e")
+
+
 def test_run_flags_spliced_before_structural_flags(xdg, ws_factory, monkeypatch):
     """run_flags are spliced into `docker run` ahead of credproxy's structural
     flags (--name, --network), so docker's last-wins parsing keeps credproxy in

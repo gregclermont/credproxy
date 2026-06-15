@@ -24,6 +24,7 @@ Applied-state records (written by this module, no side effects on read):
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from typing import Callable
@@ -203,7 +204,18 @@ def create_ws_container(
     # having to trip a TLS-interception error and investigate it. Points at the
     # agent-facing guidance; /etc/hosts already resolves proxy.local.
     args += ["-e", "CREDPROXY_SETUP=http://proxy.local/llms.txt"]
-    # env vars from config (after the breadcrumb, so a user could override it)
+    # Host identity breadcrumb: the uid/gid the CLI runs as -- i.e. the owner of
+    # the user's bind-mounted project dirs. `setup` can match a non-root user to
+    # it (`useradd -u $CREDPROXY_HOST_UID dev`) so that user can read/write the
+    # mounts without changing host ownership; the same value feeds a rootless
+    # podman `run_flags = ["--userns=keep-id:uid=$CREDPROXY_HOST_UID"]`. Stable
+    # per host user, so (like CREDPROXY_SETUP) it's not part of the spec hash.
+    host_uid = getattr(os, "getuid", lambda: None)()
+    host_gid = getattr(os, "getgid", lambda: None)()
+    if host_uid is not None:
+        args += ["-e", f"CREDPROXY_HOST_UID={host_uid}",
+                 "-e", f"CREDPROXY_HOST_GID={host_gid}"]
+    # env vars from config (after the breadcrumbs, so a user could override them)
     for k, v in cfg.get("env", {}).items():
         args += ["-e", f"{k}={v}"]
     # `tail -f /dev/null` keeps the container alive to `exec` into; the

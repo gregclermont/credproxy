@@ -118,20 +118,27 @@ Running the workspace as a non-root `user` (above) and bind-mounting host
 directories into it runs into a runtime-specific ownership problem, and there is
 no single portable flag for it — rootful and rootless runtimes have opposite uid
 models. credproxy never changes host-file ownership to paper over this; instead
-you pick the right lever per runtime via `run_flags`. In every case the host
-bytes and ownership are left untouched.
+you pick the right lever per runtime. In every case the host bytes and ownership
+are left untouched.
+
+Every workspace gets `CREDPROXY_HOST_UID` / `CREDPROXY_HOST_GID` in its
+environment — the uid/gid the CLI runs as, i.e. the owner of your bind-mounted
+project dirs. That single value is the canonical "workspace uid" on both
+runtimes, so the recipes reference it instead of a hardcoded number:
 
 - **Rootful Docker / Docker Desktop (macOS):** container uid `N` == host uid `N`.
-  Create the non-root user with `uid:gid` equal to the host owner's (in `setup`,
-  e.g. `useradd -u 1000 -g 1000 dev`) and the bind mounts are writable as that
-  user. (On Docker Desktop the file share is usually permissive already, so this
-  often just works.) No `run_flags` needed.
+  Create the non-root user with that uid in `setup`
+  (`useradd -u "$CREDPROXY_HOST_UID" -g "$CREDPROXY_HOST_GID" dev`) and the bind
+  mounts are writable as that user. (On Docker Desktop the file share is usually
+  permissive already, so this often just works.) No `run_flags` needed.
 - **Rootless Podman (Linux):** the user namespace maps your host uid to container
   **root**, so a non-root user can't write the mounts by default. Map your host
   uid onto the container user with
-  `run_flags = ["--userns=keep-id:uid=1000,gid=1000"]` (create `dev` as uid 1000
-  in `setup`). Both the bind mounts and the home volume then line up. A
-  per-mount `-v SRC:DST:idmap` is the finer-grained alternative.
+  `run_flags = ["--userns=keep-id:uid=1000,gid=1000"]`, then create `dev` with
+  the matching uid in `setup`. Both the bind mounts and the home volume then line
+  up. A per-mount `-v SRC:DST:idmap` is the finer-grained alternative.
+  (`run_flags` can't read the env var — TOML is static — so use the same literal
+  uid in the flag and the `useradd`.)
 
 `run_flags` is part of the container spec, so changing it recreates the
 workspace on the next `start`.
