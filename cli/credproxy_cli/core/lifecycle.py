@@ -68,6 +68,7 @@ def _write_applied_spec(ws: Workspace, cfg: dict, proxy_id: str | None) -> None:
         "env": cfg["env"],
         "setup": cfg["setup"],
         "run_flags": cfg.get("run_flags") or [],
+        "map_host_user": bool(cfg.get("map_host_user")),
         "proxy_id": proxy_id,
     }
     ws.applied_spec_path.write_text(json.dumps(spec, indent=2) + "\n")
@@ -165,6 +166,29 @@ def create_proxy(ws: Workspace, meta: ImageEnv) -> None:
     docker.docker(args)
 
 
+def _host_user_run_flags(cfg: dict) -> list[str]:
+    """The userns flag that makes a non-root `user` own the bind mounts when
+    `map_host_user` is set -- runtime-specific, host ownership untouched.
+
+    Only rootless podman needs a lever: there the userns maps host-you to
+    container-root, so a non-root user can't write the mounts; --userns=keep-id
+    maps your uid/gid onto the container user instead. On Docker (uids 1:1) and
+    when map_host_user is off this is a no-op -- the matching uid via
+    CREDPROXY_HOST_UID handles Docker. Returns [] unless the runtime actually
+    needs it, so the same config stays portable across runtimes.
+
+    A no-op without a non-root `user`: the default root workspace already owns
+    the mounts on every runtime, so there is nothing to map (and we skip the
+    runtime probe). Checked before the probe so the common root workspace pays
+    no daemon round-trip."""
+    if not cfg.get("map_host_user") or not cfg.get("user") or not hasattr(os, "getuid"):
+        return []
+    from .runtime import is_podman_rootless
+    if not is_podman_rootless():
+        return []
+    return [f"--userns=keep-id:uid={os.getuid()},gid={os.getgid()}"]
+
+
 def create_ws_container(
     ws: Workspace, cfg: dict, spec_hash: str, proxy_id: str | None = None
 ) -> None:
@@ -176,6 +200,10 @@ def create_ws_container(
         # can't detach the netns or rename the box; additive flags (--userns,
         # extra --mount/-v, --security-opt) still take effect.
         *(cfg.get("run_flags") or []),
+        # credproxy-managed userns mapping (map_host_user); after run_flags so
+        # it wins over a user-supplied --userns -- map_host_user means "let
+        # credproxy own the user namespace".
+        *_host_user_run_flags(cfg),
         "--name", ws.ws_container,
         "--label", "credproxy.role=workspace",
         "--label", f"credproxy.workspace={ws.name}",
@@ -530,6 +558,16 @@ def _compute_drift(
                 item="run_flags",
                 applied=applied_run_flags,
                 configured=configured_run_flags,
+            ))
+        # map_host_user: bool (missing in older specs -> False)
+        configured_map = bool(cfg.get("map_host_user"))
+        applied_map = bool(applied_spec.get("map_host_user"))
+        if configured_map != applied_map:
+            changes.append(DriftItem(
+                kind="container",
+                item="map_host_user",
+                applied=applied_map,
+                configured=configured_map,
             ))
 
     # ---- bindings drift ----

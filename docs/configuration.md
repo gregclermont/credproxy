@@ -91,12 +91,13 @@ hosts    = ["sts.amazonaws.com"]
 | `env` | table (string → string) | `{}` | Passed to the container as `-e KEY=VALUE`. Both keys and values must be strings. |
 | `setup` | list of strings | `[]` | Shell commands run **once**, right after the container is (re)created, via `sh -lc`. A failing command stops `start` and leaves the container in place for debugging. Re-run only happens when the container is recreated (see drift below), not on every `start`. |
 | `run_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the workspace `docker run`. credproxy's structural flags (`--name`, labels, `--network`, the home volume) are applied **after** these and win on conflict, so `run_flags` can't detach the netns or rename the container; additive flags (`--userns`, an extra `--mount`/`-v`, `--security-opt`) take effect. The main use is runtime-specific uid mapping (see *Non-root user & mount ownership* below). |
+| `map_host_user` | bool | `false` | Make the non-root `user` own your bind mounts without changing host ownership. credproxy picks the runtime-appropriate lever automatically (`--userns=keep-id` on rootless podman; a no-op on Docker, where the matching uid does it). **No-op unless `user` is set.** The managed alternative to a hand-written `--userns` in `run_flags`; don't set both. See *Non-root user & mount ownership* below. |
 | `auto_stop` | bool | `false` | When `true`, the workspace stops once the last `enter` session exits. Read fresh at session end, so toggling it mid-session takes effect immediately. A stopped workspace is resumed automatically by the next `enter`. |
 
-Changing `image`, `home`, `mounts`, `env`, `setup`, or `run_flags` is
-**container-spec drift**: it requires recreating the workspace container, which
-happens on the next `start` (the home volume is preserved). Editing bindings
-does **not** require a recreate — see below.
+Changing `image`, `home`, `mounts`, `env`, `setup`, `run_flags`, or
+`map_host_user` is **container-spec drift**: it requires recreating the
+workspace container, which happens on the next `start` (the home volume is
+preserved). Editing bindings does **not** require a recreate — see below.
 
 ### Exec settings
 
@@ -124,24 +125,46 @@ are left untouched.
 Every workspace gets `CREDPROXY_HOST_UID` / `CREDPROXY_HOST_GID` in its
 environment — the uid/gid the CLI runs as, i.e. the owner of your bind-mounted
 project dirs. That single value is the canonical "workspace uid" on both
-runtimes, so the recipes reference it instead of a hardcoded number:
+runtimes.
 
-- **Rootful Docker / Docker Desktop (macOS):** container uid `N` == host uid `N`.
-  Create the non-root user with that uid in `setup`
-  (`useradd -u "$CREDPROXY_HOST_UID" -g "$CREDPROXY_HOST_GID" dev`) and the bind
-  mounts are writable as that user. (On Docker Desktop the file share is usually
-  permissive already, so this often just works.) No `run_flags` needed.
-- **Rootless Podman (Linux):** the user namespace maps your host uid to container
-  **root**, so a non-root user can't write the mounts by default. Map your host
-  uid onto the container user with
-  `run_flags = ["--userns=keep-id:uid=1000,gid=1000"]`, then create `dev` with
-  the matching uid in `setup`. Both the bind mounts and the home volume then line
-  up. A per-mount `-v SRC:DST:idmap` is the finer-grained alternative.
-  (`run_flags` can't read the env var — TOML is static — so use the same literal
-  uid in the flag and the `useradd`.)
+### The easy path: `map_host_user`
 
-`run_flags` is part of the container spec, so changing it recreates the
-workspace on the next `start`.
+Set `map_host_user = true` and create the user in `setup` matched to that uid:
+
+```toml
+user = "dev"
+map_host_user = true
+mounts = ["~/code:/code"]
+setup = [
+  "useradd -u $CREDPROXY_HOST_UID -m dev || true",
+]
+```
+
+This single config works **unchanged across runtimes** — credproxy detects the
+runtime and applies the right lever: on rootless podman it adds
+`--userns=keep-id:uid=…,gid=…` (mapping your uid onto `dev`); on Docker it adds
+nothing, because the matching uid from `setup` already lines up 1:1. The host
+files are never chowned. `map_host_user` is part of the container spec, so
+toggling it recreates the workspace on the next `start`.
+
+(Caveat: `map_host_user` covers Docker, Docker Desktop, and rootless **podman**.
+Rootless **Docker** has no `keep-id` equivalent and is not covered — there you'd
+need idmapped bind mounts.)
+
+### The manual path: `run_flags`
+
+If you'd rather own the user namespace yourself (or need a non-default mapping),
+skip `map_host_user` and write the flag directly:
+
+- **Rootful Docker / Docker Desktop (macOS):** uids are 1:1, so just
+  `useradd -u "$CREDPROXY_HOST_UID" dev` in `setup`; no `run_flags` needed.
+- **Rootless Podman (Linux):** `run_flags = ["--userns=keep-id:uid=1000,gid=1000"]`
+  plus a matching `useradd`. (`run_flags` is static TOML and can't read the env
+  var, so use the same literal uid in both.) A per-mount `-v SRC:DST:idmap` is the
+  finer-grained alternative.
+
+Don't combine `map_host_user` with a `--userns` in `run_flags` — pick one owner
+of the user namespace.
 
 ### Bindings
 

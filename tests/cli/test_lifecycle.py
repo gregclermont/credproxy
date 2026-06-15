@@ -126,6 +126,73 @@ def test_config_env_overrides_host_uid_breadcrumb(xdg, ws_factory, monkeypatch):
     assert e_indices and e_indices[-1] > args.index("-e")
 
 
+def test_map_host_user_injects_keepid_on_podman_rootless(xdg, ws_factory, monkeypatch):
+    """map_host_user + podman-rootless -> --userns=keep-id with the CLI's uid."""
+    import os
+    if not hasattr(os, "getuid"):
+        import pytest
+        pytest.skip("no getuid on this platform")
+    from credproxy_cli.core import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: True)
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": [],
+           "user": "dev", "map_host_user": True}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    args = calls[-1]
+    flag = f"--userns=keep-id:uid={os.getuid()},gid={os.getgid()}"
+    assert flag in args
+    # credproxy-managed userns precedes --name/--network (stays authoritative)
+    assert args.index(flag) < args.index("--name")
+
+
+def test_map_host_user_noop_on_docker(xdg, ws_factory, monkeypatch):
+    """map_host_user on a non-podman-rootless runtime injects nothing."""
+    from credproxy_cli.core import lifecycle
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless", lambda: False)
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": [],
+           "user": "dev", "map_host_user": True}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    assert not any(a.startswith("--userns") for a in calls[-1])
+
+
+def test_map_host_user_noop_without_user(xdg, ws_factory, monkeypatch):
+    """map_host_user with no non-root `user` is a no-op (root already owns the
+    mounts) and short-circuits before the runtime probe."""
+    from credproxy_cli.core import lifecycle
+    probed = []
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless",
+                        lambda: probed.append(True) or True)
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": [],
+           "map_host_user": True}  # no `user`
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    assert not any(a.startswith("--userns") for a in calls[-1])
+    assert probed == []
+
+
+def test_map_host_user_off_skips_probe_and_flag(xdg, ws_factory, monkeypatch):
+    """With map_host_user off, no userns flag and the runtime probe isn't even
+    consulted (no daemon round-trip on the common root workspace)."""
+    from credproxy_cli.core import lifecycle
+    probed = []
+    monkeypatch.setattr("credproxy_cli.core.runtime.is_podman_rootless",
+                        lambda: probed.append(True) or True)
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": []}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    assert not any(a.startswith("--userns") for a in calls[-1])
+    assert probed == []  # short-circuited before the probe
+
+
 def test_run_flags_spliced_before_structural_flags(xdg, ws_factory, monkeypatch):
     """run_flags are spliced into `docker run` ahead of credproxy's structural
     flags (--name, --network), so docker's last-wins parsing keeps credproxy in

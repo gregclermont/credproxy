@@ -418,3 +418,40 @@ def test_load_config_run_flags_not_list_of_strings(xdg, workspaces_dir):
     _write(workspaces_dir, "b", 'image = "alpine:3"\nrun_flags = [1, 2]\n')
     with pytest.raises(ConfigError, match="`run_flags` must be an array of strings"):
         load_config(Workspace("b"))
+
+
+# ---- map_host_user -----------------------------------------------------------
+
+
+def test_load_config_map_host_user(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "m", 'image = "alpine:3"\nmap_host_user = true\n')
+    assert load_config(Workspace("m"))["map_host_user"] is True
+
+
+def test_load_config_map_host_user_default(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "md", 'image = "alpine:3"\n')
+    assert load_config(Workspace("md"))["map_host_user"] is False
+
+
+def test_load_config_map_host_user_not_bool(xdg, workspaces_dir):
+    from credproxy_cli.core.config import ConfigError, load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nmap_host_user = "yes"\n')
+    with pytest.raises(ConfigError, match="`map_host_user` must be a boolean"):
+        load_config(Workspace("b"))
+
+
+def test_spec_hash_changes_on_map_host_user(xdg):
+    """map_host_user shapes the container -> changing it changes the spec hash."""
+    from credproxy_cli.core.config import workspace_spec_hash
+
+    base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
+    assert workspace_spec_hash(base, "p") == workspace_spec_hash({**base, "map_host_user": False}, "p")
+    assert workspace_spec_hash(base, "p") != workspace_spec_hash({**base, "map_host_user": True}, "p")

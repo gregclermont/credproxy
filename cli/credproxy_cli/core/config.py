@@ -11,6 +11,8 @@ Schema:
   env    = { KEY = "value" }           # table, optional; passed as -e to ws
   setup  = ["npm ci"]                  # list[str], optional; run once on create
   run_flags = ["--userns=keep-id"]     # list[str], optional; spliced into docker run
+  map_host_user = true                 # bool, optional; non-root `user` owns mounts
+  user   = "dev"                       # str, optional; user `enter` execs as
 
   [[binding]]                          # zero or more; see core/bindings.py
   injector = "bearer"
@@ -52,6 +54,14 @@ image = "{image}"
 # can `useradd` + chown the home volume). Exec-only: changing it never
 # recreates the container, and `enter --user NAME` overrides it per session.
 # user = "dev"
+
+# Make the non-root `user` above own your bind mounts, without changing
+# ownership on the host. credproxy picks the runtime-appropriate lever:
+# --userns=keep-id on rootless podman; on Docker the matching uid does it
+# (create the user as $CREDPROXY_HOST_UID in `setup`). No-op unless `user` is
+# set. Recreates the container on change. Don't combine with a --userns in
+# run_flags -- pick one owner of the user namespace.
+# map_host_user = true
 
 # Escape hatch: extra flags spliced into `docker exec` for `enter`
 # (e.g. a working dir or env). credproxy keeps control of -i/-t/-d. Exec-only.
@@ -213,6 +223,15 @@ def load_config(ws: Workspace) -> dict:
     if not isinstance(run_flags, list) or not all(isinstance(f, str) for f in run_flags):
         raise ConfigError(f"{ws.config_path}: `run_flags` must be an array of strings")
 
+    # map_host_user: let credproxy make the non-root `user` own the bind mounts
+    # without changing host ownership, picking the runtime-appropriate lever
+    # (--userns=keep-id on rootless podman; a no-op on Docker, where the matching
+    # uid via CREDPROXY_HOST_UID handles it). Shapes the container -> part of the
+    # spec hash. Meaningful only with a non-root `user`; a no-op otherwise.
+    map_host_user = raw.get("map_host_user", False)
+    if not isinstance(map_host_user, bool):
+        raise ConfigError(f"{ws.config_path}: `map_host_user` must be a boolean")
+
     return {
         "image": image,
         "home": home,
@@ -222,6 +241,7 @@ def load_config(ws: Workspace) -> dict:
         "user": user,
         "exec_flags": exec_flags,
         "run_flags": run_flags,
+        "map_host_user": map_host_user,
     }
 
 
@@ -236,8 +256,9 @@ def quick_image(ws: Workspace) -> str:
 
 def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
     """Identity of the workspace container's launch spec. Changing the
-    image, home, mounts, env, setup, run_flags, or the proxy container (netns
-    peer) yields a new hash, which `start` uses to decide whether to recreate."""
+    image, home, mounts, env, setup, run_flags, map_host_user, or the proxy
+    container (netns peer) yields a new hash, which `start` uses to decide
+    whether to recreate."""
     spec = json.dumps(
         {
             "image": cfg["image"],
@@ -246,6 +267,7 @@ def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
             "env": cfg["env"],
             "setup": cfg["setup"],
             "run_flags": cfg.get("run_flags") or [],
+            "map_host_user": bool(cfg.get("map_host_user")),
             "proxy": proxy_id,
         },
         sort_keys=True,
