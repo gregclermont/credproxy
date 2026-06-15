@@ -625,3 +625,147 @@ def test_wire_config_missing_placeholder_raises(xdg):
     )
     with pytest.raises(ConfigError, match="no placeholder"):
         wire_config([b], fetch_many=lambda p, refs: {r: "v" for r in refs})
+
+
+# ---- provider batching (one invocation per provider) ------------------------
+
+
+def _bearer(name, provider, secret, host="h.io"):
+    from credproxy_cli.core.bindings import Binding
+    return Binding(
+        name=name, injector="bearer", provider=provider, secret=secret,
+        hosts=(host,), placeholder=f"credproxy_{name}_xxxxxxxxxxxxxxxxxxxx",
+        env=None,
+    )
+
+
+def test_resolve_secrets_groups_and_dedups(xdg, workspaces_dir):
+    """resolve_secrets makes ONE call per distinct provider with the deduped
+    union of refs across the bindings that share it."""
+    from credproxy_cli.core.bindings import resolve_secrets
+
+    calls = []
+
+    def fetch(provider, refs):
+        calls.append((provider, list(refs)))
+        return {r: f"{provider}:{r}" for r in refs}
+
+    bindings = [
+        _bearer("a", "vault", "A"),
+        _bearer("b", "vault", "B"),
+        _bearer("c", "vault", "A"),   # duplicate ref -> deduped
+        _bearer("d", "env", "Z"),
+    ]
+    resolved = resolve_secrets(bindings, fetch)
+
+    # One call per provider, refs deduped and order-preserving.
+    assert calls == [("vault", ["A", "B"]), ("env", ["Z"])]
+    assert resolved == {
+        "vault": {"A": "vault:A", "B": "vault:B"},
+        "env": {"Z": "env:Z"},
+    }
+
+
+def test_wire_config_one_call_per_provider(xdg, workspaces_dir):
+    """Several bindings sharing a provider resolve in a single invocation, and
+    every binding still gets its own resolved value."""
+    from credproxy_cli.core.bindings import wire_config
+
+    calls = []
+
+    def fetch(provider, refs):
+        calls.append(provider)
+        return {r: f"val-{r}" for r in refs}
+
+    bindings = [
+        _bearer("a", "vault", "A"),
+        _bearer("b", "vault", "B"),
+        _bearer("c", "env", "C"),
+    ]
+    result = wire_config(bindings, fetch_many=fetch)
+
+    assert calls == ["vault", "env"]  # one per provider, not one per binding
+    secrets = {e["name"]: e["secret"] for e in result["bindings"]}
+    assert secrets == {
+        "a": {"value": "val-A"},
+        "b": {"value": "val-B"},
+        "c": {"value": "val-C"},
+    }
+
+
+def test_wire_config_aborts_before_fetch_on_bad_placeholder(xdg, workspaces_dir):
+    """A placeholder config error aborts WITHOUT paying any provider call (so a
+    vault is never needlessly unlocked for a config that can't push)."""
+    from credproxy_cli.core.bindings import Binding, wire_config
+    from credproxy_cli.core.errors import ConfigError
+
+    called = []
+
+    def fetch(provider, refs):
+        called.append(provider)
+        return {r: "v" for r in refs}
+
+    good = _bearer("good", "vault", "A")
+    bad = Binding(name="bad", injector="bearer", provider="vault",
+                  secret="B", hosts=("h.io",), placeholder=None, env=None)
+    with pytest.raises(ConfigError, match="no placeholder"):
+        wire_config([good, bad], fetch_many=fetch)
+    assert called == []  # nothing fetched
+
+
+def test_test_bindings_batches_per_provider(xdg, workspaces_dir):
+    """test_bindings resolves a shared provider once and reports each binding."""
+    from credproxy_cli.core.bindings import test_bindings
+
+    calls = []
+
+    def fetch(provider, refs):
+        calls.append((provider, list(refs)))
+        return {r: "ABCD" for r in refs}
+
+    bindings = [_bearer("a", "vault", "A"), _bearer("b", "vault", "B")]
+    results = test_bindings(bindings, fetch_many=fetch)
+
+    assert calls == [("vault", ["A", "B"])]  # one unlock for both
+    assert [(r.name, r.ok, r.value_len) for r in results] == [
+        ("a", True, 4), ("b", True, 4)
+    ]
+
+
+def test_test_bindings_failure_attributed_per_binding(xdg, workspaces_dir):
+    """When a provider's batch fails, test_bindings retries per binding so the
+    failure pins to the right binding(s) -- the healthy ones still pass."""
+    from credproxy_cli.core.bindings import test_bindings
+    from credproxy_cli.core.errors import ProviderError
+
+    calls = []
+
+    def fetch(provider, refs):
+        calls.append(list(refs))
+        if "BAD" in refs:
+            raise ProviderError("secret 'BAD' not found")
+        return {r: "ABCD" for r in refs}
+
+    bindings = [_bearer("ok", "vault", "GOOD"), _bearer("broken", "vault", "BAD")]
+    results = test_bindings(bindings, fetch_many=fetch)
+
+    # batch [GOOD, BAD] fails -> per-binding retry [GOOD] (ok) and [BAD] (fail).
+    assert calls == [["GOOD", "BAD"], ["GOOD"], ["BAD"]]
+    by_name = {r.name: r for r in results}
+    assert by_name["ok"].ok and by_name["ok"].value_len == 4
+    assert not by_name["broken"].ok
+    assert "not found" in by_name["broken"].error
+
+
+def test_test_bindings_preserves_order(xdg, workspaces_dir):
+    """Results come back in input order even across interleaved providers."""
+    from credproxy_cli.core.bindings import test_bindings
+
+    bindings = [
+        _bearer("a", "vault", "A"),
+        _bearer("b", "env", "B"),
+        _bearer("c", "vault", "C"),
+    ]
+    results = test_bindings(bindings, fetch_many=lambda p, refs: {r: "xy" for r in refs})
+    assert [r.name for r in results] == ["a", "b", "c"]
+    assert all(r.ok for r in results)

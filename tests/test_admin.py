@@ -421,3 +421,33 @@ async def test_no_store_header_present(aiohttp_client, app):
     client = await aiohttp_client(app)
     resp = await client.get("/health")
     assert resp.headers.get("Cache-Control") == "no-store"
+
+
+# ---- GET /admin/config: loaded + fingerprint (for the enter fast path) ----
+
+
+async def test_get_config_unloaded(aiohttp_client, app):
+    client = await aiohttp_client(app)
+    resp = await client.get(
+        "/admin/config", headers={"Authorization": "Bearer established"})
+    assert resp.status == 200
+    assert await resp.json() == {"loaded": False, "fingerprint": None}
+
+
+async def test_get_config_requires_auth(aiohttp_client, app):
+    client = await aiohttp_client(app)
+    resp = await client.get("/admin/config")
+    assert resp.status == 401
+
+
+async def test_get_config_reports_fingerprint(aiohttp_client, app):
+    client = await aiohttp_client(app)
+    body = dict(VALID_CONFIG, fingerprint="abc123")
+    r = await client.post(
+        "/admin/config",
+        headers={"Authorization": "Bearer established"}, json=body)
+    assert r.status == 200
+    resp = await client.get(
+        "/admin/config", headers={"Authorization": "Bearer established"})
+    assert resp.status == 200
+    assert await resp.json() == {"loaded": True, "fingerprint": "abc123"}

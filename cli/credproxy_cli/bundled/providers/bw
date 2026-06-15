@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+# credproxy provider: bw (Bitwarden)  —  protocol: docs/providers.md
+#
+# A provider is a standalone executable speaking the batch protocol. Everything
+# specific to THIS provider is the metadata block and the get() function; the
+# protocol footer is identical across providers. Copy this file as a starting
+# point with `credproxy provider scaffold NAME`.
+#
+# Batch-aware: a `get` request carries every ref the resolve needs, and the CLI
+# already groups all bindings on this provider into ONE invocation. So we read
+# the whole vault with a single `bw list items` (cached for the invocation) and
+# resolve every ref against it in memory -- the costly part (the `bw` process
+# startup + a vault decrypt, and an unlock if the vault is locked) is paid once
+# per resolve, not once per ref or once per binding.
+import json
+import os
+import subprocess
+import sys
+
+# ════ metadata ═══════════════════════════════════════════════════════
+NAME = "bw"
+DESCRIPTION = "Bitwarden (bw CLI)"
+PROTOCOL_VERSION = 1
+HELP = """\
+Reads secrets from Bitwarden (bw CLI).
+  ref:     <item>[#<field>] -- item by name or id; field defaults to `password`
+           (also username, uri, totp, notes, or a custom field name). `#` (not
+           `/`) delimits the field so item names may contain slashes.
+  example: --provider bw --secret github
+           --provider bw --secret "aws-prod#access_key_id"
+Reuses $BW_SESSION when the vault is unlocked; otherwise prompts for the master
+password on the terminal once per invocation. A batch/multi-slot fetch reads the
+whole vault in a single `bw` call and unlocks just once. Requires `bw` on PATH
+and a logged-in account (`bw login`).
+"""
+
+
+# ════ fetch one secret (the only provider-specific logic) ═════════════
+class NotFound(Exception):
+    """A ref that doesn't resolve to an item/field -> exit 2."""
+
+
+class BwError(Exception):
+    """A backend failure (bw missing, locked-and-can't-unlock, crash) -> exit 1."""
+
+
+# Cached for the lifetime of one invocation: (by_id, by_name, session). The
+# whole point of the batch protocol -- `bw list items` runs at most once even
+# when many refs are requested.
+_VAULT = None
+
+
+def _bw(args, session=None):
+    """Run `bw <args>`, threading a session key when we have one. stderr is
+    captured so a failure message can be surfaced cleanly."""
+    env = dict(os.environ)
+    if session:
+        env["BW_SESSION"] = session
+    return subprocess.run(["bw", *args], capture_output=True, text=True, env=env)
+
+
+def _status():
+    r = _bw(["status"])
+    if r.returncode != 0:
+        raise BwError(f"`bw status` failed: {r.stderr.strip() or 'is bw installed?'}")
+    try:
+        return json.loads(r.stdout)
+    except ValueError as e:
+        raise BwError(f"`bw status` returned non-JSON: {e}")
+
+
+def _ensure_unlocked():
+    """Return a session key for vault calls, unlocking exactly once if needed.
+    Only ever reached from the get path -- never from describe/help, so listing
+    providers never pops an unlock prompt."""
+    st = _status().get("status")
+    if st == "unlocked":
+        return os.environ.get("BW_SESSION")  # ambient session is valid
+    if st == "unauthenticated":
+        raise BwError("Bitwarden is logged out; run `bw login` first")
+    # locked -> prompt once for the master password. getpass reads /dev/tty, so
+    # it doesn't collide with our stdin (which carries the protocol request).
+    import getpass
+    try:
+        pw = getpass.getpass("Bitwarden master password: ", stream=sys.stderr)
+    except (EOFError, OSError):
+        raise BwError("vault is locked and no terminal is available to unlock it "
+                      "(unlock with `bw unlock` and export BW_SESSION)")
+    # Pass the password via the environment (--passwordenv), keeping it out of
+    # argv / the process list.
+    env = dict(os.environ, BW_MASTERPW=pw)
+    r = subprocess.run(["bw", "unlock", "--passwordenv", "BW_MASTERPW", "--raw"],
+                       capture_output=True, text=True, env=env)
+    if r.returncode != 0 or not r.stdout.strip():
+        raise BwError(f"`bw unlock` failed: {r.stderr.strip() or 'wrong password?'}")
+    return r.stdout.strip()
+
+
+def _load_vault():
+    """Fetch + index the vault once per invocation: one `bw list items` decrypt
+    for the entire batch. Returns (by_id, by_name, session)."""
+    global _VAULT
+    if _VAULT is not None:
+        return _VAULT
+    session = _ensure_unlocked()
+    r = _bw(["list", "items"], session)
+    if r.returncode != 0:
+        raise BwError(f"`bw list items` failed: {r.stderr.strip()}")
+    try:
+        items = json.loads(r.stdout)
+    except ValueError as e:
+        raise BwError(f"`bw list items` returned non-JSON: {e}")
+    by_id, by_name = {}, {}
+    for it in items:
+        by_id[it["id"]] = it
+        by_name.setdefault(it["name"], []).append(it)
+    _VAULT = (by_id, by_name, session)
+    return _VAULT
+
+
+def _extract(item, field, session):
+    login = item.get("login") or {}
+    if field == "password":
+        v = login.get("password")
+    elif field == "username":
+        v = login.get("username")
+    elif field == "uri":
+        uris = login.get("uris") or []
+        v = uris[0].get("uri") if uris else None
+    elif field == "notes":
+        v = item.get("notes")
+    elif field == "totp":
+        # A TOTP is generated, not stored, so it needs its own `bw get totp`
+        # (only refs that actually ask for totp pay this extra call).
+        r = _bw(["get", "totp", item["id"]], session)
+        if r.returncode != 0 or not r.stdout.strip():
+            raise NotFound(f"item {item['name']!r} has no TOTP")
+        return r.stdout.strip()
+    else:
+        # A custom field, matched by name.
+        for f in item.get("fields") or []:
+            if f.get("name") == field:
+                return f.get("value") or ""
+        raise NotFound(f"item {item['name']!r} has no field {field!r}")
+    if v is None:
+        raise NotFound(f"item {item['name']!r} has no {field}")
+    return v
+
+
+def get(ref):
+    item_ref, sep, field = ref.partition("#")
+    field = field if sep else "password"
+    if not item_ref:
+        raise NotFound(f"empty item in ref {ref!r}")
+    by_id, by_name, session = _load_vault()
+    item = by_id.get(item_ref)
+    if item is None:
+        matches = by_name.get(item_ref, [])
+        if len(matches) > 1:
+            raise NotFound(
+                f"{len(matches)} items named {item_ref!r}; reference it by id"
+            )
+        item = matches[0] if matches else None
+    if item is None:
+        raise NotFound(f"no Bitwarden item {item_ref!r}")
+    return _extract(item, field, session)
+
+
+# ════ protocol footer (identical for every provider — skip on a scan) ═
+def _fail(msg, code):
+    print(f"{NAME} provider: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def main():
+    try:
+        req = json.load(sys.stdin)
+    except Exception as e:
+        _fail(f"bad request JSON: {e}", 1)
+    if req.get("version") != PROTOCOL_VERSION:
+        _fail("unsupported version", 3)
+    op = req.get("op")
+    if op == "describe":
+        json.dump({"description": DESCRIPTION}, sys.stdout)
+    elif op == "help":
+        json.dump({"help": HELP}, sys.stdout)
+    elif op == "get":
+        values = {}
+        try:
+            for ref in req.get("secrets") or []:
+                values[ref] = get(ref)
+        except NotFound as e:
+            _fail(str(e), 2)
+        except BwError as e:
+            _fail(str(e), 1)
+        json.dump({"values": values}, sys.stdout)
+    else:
+        _fail("unsupported op", 3)
+
+
+main()

@@ -158,12 +158,13 @@ def do_list(ctx: Ctx, filter_: str | None) -> None:
 
 
 def do_enter(ctx: Ctx, name: str | None, trailing: list[str],
-             user_override: str | None = None) -> None:
+             user_override: str | None = None, push: bool = False) -> None:
     if ctx.json:
         fail("enter does not support --json (it execs an interactive shell)")
     ws = _resolve_ws(ctx, name)
     cmd = trailing or ["bash"]
-    exit_code = lifecycle.enter_workspace(ws, cmd, notify=say, user_override=user_override)
+    exit_code = lifecycle.enter_workspace(
+        ws, cmd, notify=say, user_override=user_override, push=push)
     sys.exit(exit_code)
 
 
@@ -494,10 +495,11 @@ def do_binding_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         if not bindings:
             fail(f"binding '{a.binding_name}' not found in workspace '{ws.name}'")
 
+    # Batch by provider: a workspace whose bindings share one provider (e.g. a
+    # vault) resolves it once for the whole `binding test`, not once per binding.
     results = []
     any_fail = False
-    for b in bindings:
-        r = core_bindings.test_binding(b)
+    for b, r in zip(bindings, core_bindings.test_bindings(bindings)):
         if not r.ok:
             any_fail = True
         results.append({
@@ -735,6 +737,10 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     # One-session override of the config `user` (e.g. `enter --user root` for a
     # debug shell in a non-root workspace) without editing the config file.
     p_enter.add_argument("--user", dest="enter_user", default=None)
+    # Force a config re-push (re-resolve secrets) even if the proxy already has
+    # the current config -- e.g. after rotating a secret in place. Default skips
+    # the push when the proxy's config fingerprint already matches.
+    p_enter.add_argument("--push", dest="enter_push", action="store_true")
     sub.add_parser("edit")
     sub.add_parser("start")
     sub.add_parser("stop")
@@ -902,9 +908,12 @@ def _scaffold_help(kind: str) -> str:
 # line for the lifecycle verbs read as "is this command even doing anything?".
 _VERB_HELP = {
     "enter": (
-        "credproxy workspace NAME enter [--user USER] [-- CMD...] -- open a shell\n"
-        "(default bash, or run CMD) in the workspace, starting it first if needed.\n"
-        "  --user USER   run as USER for this session (overrides config `user`)."
+        "credproxy workspace NAME enter [--user USER] [--push] [-- CMD...] -- open\n"
+        "a shell (default bash, or run CMD) in the workspace, starting it if needed.\n"
+        "  --user USER   run as USER for this session (overrides config `user`).\n"
+        "  --push        force a config re-push (re-resolve secrets) even if the\n"
+        "                proxy already has the current config -- e.g. after\n"
+        "                rotating a secret in place. Default skips the redundant push."
     ),
     "start": (
         "credproxy workspace NAME start -- (re)start the proxy, wait for health,\n"
@@ -1038,7 +1047,7 @@ def _run_ws_verb(
     a = _build_leaf_parser().parse_args(verb_argv)
     verb = a.verb
     if verb == "enter":
-        do_enter(ctx, name, trailing, a.enter_user)
+        do_enter(ctx, name, trailing, a.enter_user, a.enter_push)
     elif verb == "edit":
         do_edit(ctx, name)
     elif verb == "start":

@@ -40,7 +40,7 @@ from .paths import (
     IMAGE_TAG,
     PROXY_DIR,
 )
-from .proxy_http import push_config, wait_for_ready
+from .proxy_http import proxy_status, push_config, wait_for_ready
 
 Notify = Callable[[str], None]
 
@@ -265,10 +265,30 @@ def _proxy_diagnostics(ws: Workspace) -> str:
     return "\n".join(lines)
 
 
-def start_workspace(ws: Workspace, notify: Notify = _noop) -> None:
+def _should_push(force_push: bool, proxy_fresh: bool,
+                 status: dict | None, want_fp: str) -> bool:
+    """Decide whether to (re)push config. Push when forced (`enter --push`,
+    `start`), when the proxy was just (re)started (its tmpfs config is empty),
+    or when we can't confirm it already holds the intended config -- it is
+    unreachable/unknown (None), reports no config, or reports a different
+    fingerprint. Only a confirmed matching fingerprint skips the push."""
+    if force_push or proxy_fresh:
+        return True
+    if not status or not status.get("loaded"):
+        return True
+    return status.get("fingerprint") != want_fp
+
+
+def start_workspace(ws: Workspace, notify: Notify = _noop,
+                    force_push: bool = True) -> None:
     """Idempotently bring the workspace to fully-running. Auto-creates
     the workspace files if missing. Multiple workspaces run independently;
     other running workspaces are left untouched.
+
+    `force_push` (default True for explicit `start`) always re-pushes config;
+    `enter` passes force_push=False for a fast path that skips the push -- and
+    the provider calls it implies -- when the already-running proxy reports the
+    intended config's fingerprint.
 
     Progress is reported through `notify`."""
     if not ws.exists():
@@ -287,6 +307,7 @@ def start_workspace(ws: Workspace, notify: Notify = _noop) -> None:
             f"image {IMAGE_TAG} not found; run `credproxy dev build` first"
         )
 
+    proxy_fresh = False  # created or started this call -> tmpfs config is empty
     status = docker.container_status(ws.proxy_container)
     if status is not None and \
             docker.inspect(ws.proxy_container, "{{.Image}}") != image_id:
@@ -297,8 +318,10 @@ def start_workspace(ws: Workspace, notify: Notify = _noop) -> None:
     if status is None:
         notify("starting proxy...")
         create_proxy(ws, meta)
+        proxy_fresh = True
     elif status != "running":
         docker.docker(["start", ws.proxy_container])
+        proxy_fresh = True
 
     # Resolve the ephemeral host port assigned to this workspace's proxy.
     host_port = docker.resolve_host_port(ws.proxy_container, meta.http_port)
@@ -310,12 +333,23 @@ def start_workspace(ws: Workspace, notify: Notify = _noop) -> None:
         # so the user doesn't have to run `logs` separately to find out.
         raise ProxyError(f"{e}\n{_proxy_diagnostics(ws)}") from e
 
-    # Always re-push: the proxy's tmpfs config does not survive a
-    # `docker start`, and re-pushing also picks up config file edits.
-    notify("pushing config...")
-    pushed_bindings = push_config(ws, host_port, notify)
-    if pushed_bindings is not None:
-        _write_applied_bindings(ws, pushed_bindings)
+    # Push the bindings config -- but on the `enter` fast path, skip it (and the
+    # provider calls it implies) when the already-running proxy reports the
+    # intended config's fingerprint. The proxy's tmpfs config does not survive a
+    # restart, so a (re)started proxy (proxy_fresh) always gets a push.
+    from .bindings import config_fingerprint, materialize_bindings
+    bindings = materialize_bindings(ws, notify)
+    want_fp = config_fingerprint(bindings)
+    status = None if (force_push or proxy_fresh) else proxy_status(ws, host_port)
+    if _should_push(force_push, proxy_fresh, status, want_fp):
+        notify("pushing config...")
+        pushed_bindings = push_config(ws, host_port, notify,
+                                      bindings=bindings, fingerprint=want_fp)
+        if pushed_bindings is not None:
+            _write_applied_bindings(ws, pushed_bindings)
+    else:
+        notify("config unchanged on the proxy; skipped push "
+               "(use `enter --push` to refresh)")
 
     # ---- workspace container ----
     proxy_id = docker.inspect(ws.proxy_container, "{{.Id}}")
@@ -739,7 +773,7 @@ def _enter_exec_cmd(cfg: dict, container: str, cmd: list[str], *,
 
 
 def enter_workspace(ws: Workspace, cmd: list[str], notify: Notify = _noop,
-                    user_override: str | None = None) -> int:
+                    user_override: str | None = None, push: bool = False) -> int:
     """Start the workspace (if not running), run `cmd` inside it, and handle
     auto-stop when the session ends.
 
@@ -763,7 +797,7 @@ def enter_workspace(ws: Workspace, cmd: list[str], notify: Notify = _noop,
     import os
     import sys
 
-    start_workspace(ws, notify)
+    start_workspace(ws, notify, force_push=push)
     cfg = load_config(ws)
 
     exec_cmd = _enter_exec_cmd(

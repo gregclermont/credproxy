@@ -105,28 +105,33 @@ async def access_log(request: web.Request, handler):
 # ---- Admin handlers ----
 
 
-async def admin_config(request: web.Request) -> web.Response:
-    """POST /admin/config -- bearer-gated config push/reload."""
-    state = request.app[STATE_KEY]
-
+def _auth_error(request: web.Request) -> web.Response | None:
+    """Bearer-auth an /admin/* request. Returns an error Response to send, or
+    None when the token is valid. The token is read from the bind mount per
+    call, so host-side rotation works without a proxy restart."""
     header = request.headers.get("Authorization", "")
     scheme, _, presented = header.partition(" ")
     if scheme != "Bearer" or not presented:
         return web.json_response(
-            {"error": "expected `Authorization: Bearer <token>`"},
-            status=401,
-        )
-
-    # Authenticate before any body processing so unauthenticated probes
-    # can't fingerprint config schema by reading 400 errors. Read the
-    # token from the bind mount per-call so host-side rotation works
-    # without a proxy restart.
+            {"error": "expected `Authorization: Bearer <token>`"}, status=401)
     try:
         token = TOKEN_PATH.read_text().strip()
     except OSError:
         return web.json_response({"error": "auth file unavailable"}, status=503)
     if not token or not hmac.compare_digest(presented, token):
         return web.json_response({"error": "invalid token"}, status=401)
+    return None
+
+
+async def admin_config(request: web.Request) -> web.Response:
+    """POST /admin/config -- bearer-gated config push/reload."""
+    state = request.app[STATE_KEY]
+
+    # Authenticate before any body processing so unauthenticated probes can't
+    # fingerprint config schema by reading 400 errors.
+    err = _auth_error(request)
+    if err is not None:
+        return err
 
     try:
         body = await request.json()
@@ -138,9 +143,32 @@ async def admin_config(request: web.Request) -> web.Response:
     except config.ConfigError as e:
         return web.json_response({"error": str(e)}, status=400)
 
+    # The whole body (including an optional `fingerprint` the host sends to mark
+    # this config version) is persisted to tmpfs; load_resolved ignores keys
+    # other than `bindings`.
     _atomic_write(CONFIG_PATH, json.dumps(body).encode(), 0o400)
     state.creds = new_creds
     return web.json_response({"ok": True})
+
+
+async def admin_config_get(request: web.Request) -> web.Response:
+    """GET /admin/config -- bearer-gated. Report whether config is currently
+    loaded and its `fingerprint`, so the host can skip a redundant re-push (the
+    `enter` fast path) when the proxy already holds the intended config. Config
+    lives on tmpfs, so a restarted proxy reports `loaded: false` and the host
+    re-pushes."""
+    err = _auth_error(request)
+    if err is not None:
+        return err
+    loaded = False
+    fingerprint = None
+    if CONFIG_PATH.exists():
+        try:
+            fingerprint = json.loads(CONFIG_PATH.read_text()).get("fingerprint")
+            loaded = True
+        except (OSError, json.JSONDecodeError):
+            loaded = False
+    return web.json_response({"loaded": loaded, "fingerprint": fingerprint})
 
 
 def _atomic_write(path: Path, data: bytes, mode: int) -> None:
@@ -153,4 +181,5 @@ def _atomic_write(path: Path, data: bytes, mode: int) -> None:
 
 admin_routes = [
     web.post("/admin/config", admin_config),
+    web.get("/admin/config", admin_config_get),
 ]

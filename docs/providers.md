@@ -32,9 +32,12 @@ user definition shadows a bundled one of the same name):
 ## Request (stdin)
 
 A single JSON object on stdin. The protocol is **batch-native**: one invocation
-carries a list of refs, so a binding's whole (possibly multi-slot) credential
-resolves in a single exec — an interactive provider prompts **once**, and a
-vault provider can coalesce same-item refs into one fetch.
+carries a list of refs. The CLI batches **across bindings**, not just within one
+— at resolve time (`start` / `apply` / `binding test`) it groups every binding's
+refs by provider and invokes each provider **once** with the deduped union. So a
+provider's setup cost is paid once per resolve, not once per binding: an
+interactive provider prompts **once** for the whole workspace, and a vault that
+must unlock unlocks **once** however many bindings draw from it.
 
 ```json
 {"version": 1, "op": "get", "secrets": ["<ref>", "<ref>", ...]}
@@ -119,6 +122,13 @@ a prompt to stdout would be parsed as part of the response and fail.
 
 The CLI uses a generous timeout (120s) precisely so an interactive prompt has
 time to be answered.
+
+The bundled `bw` (Bitwarden) provider is the canonical example: it reuses
+`$BW_SESSION` when the vault is already unlocked, and otherwise prompts for the
+master password on the terminal. Because the CLI batches every binding on a
+provider into one invocation and `bw` reads the whole vault in a single
+`bw list items`, that prompt (and the decrypt behind it) happens **once** per
+resolve no matter how many bindings draw from the vault.
 
 ## Example: the bundled `env` provider
 

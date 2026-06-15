@@ -19,6 +19,7 @@ Generated names/placeholders are written back, not held in memory.
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -64,6 +65,36 @@ def secret_display(secret: str | dict[str, str]) -> str:
     if isinstance(secret, str):
         return secret
     return ", ".join(f"{slot}={ref}" for slot, ref in secret.items())
+
+
+def _refs_by_provider(bindings: list[Binding]) -> dict[str, list[str]]:
+    """Group the bindings' secret refs by provider, deduped and
+    order-preserving: `{provider: [ref, ...]}`. Taking the union across every
+    binding that names a provider is what lets the caller resolve that provider
+    ONCE (one batch invocation) instead of once per binding."""
+    buckets: dict[str, dict[str, None]] = {}
+    for b in bindings:
+        bucket = buckets.setdefault(b.provider, {})
+        for ref in secret_refs(b).values():
+            bucket[ref] = None  # dict preserves insertion order, dedups refs
+    return {provider: list(refs) for provider, refs in buckets.items()}
+
+
+def resolve_secrets(
+    bindings: list[Binding],
+    fetch_many: Callable[[str, list[str]], dict[str, str]] = provider_fetch_many,
+) -> dict[str, dict[str, str]]:
+    """Resolve every binding's secret(s) with ONE provider invocation per
+    distinct provider -- the batch carries the union of refs across all bindings
+    that share it. So a provider with a costly setup (a vault that must unlock,
+    a session that must authenticate) pays that cost once per resolve, not once
+    per binding. Returns `{provider: {ref: value}}`.
+
+    `fetch_many` is injected for testing; defaults to the real provider exec."""
+    return {
+        provider: fetch_many(provider, refs)
+        for provider, refs in _refs_by_provider(bindings).items()
+    }
 
 
 # ---- parsing / validation ---------------------------------------------------
@@ -468,43 +499,122 @@ class BindingTestResult:
     note: str | None = None  # advisory (e.g. scripted injector: script resolved)
 
 
-def test_binding(
-    binding: Binding,
+def test_bindings(
+    bindings: list[Binding],
     fetch_many: Callable[[str, list[str]], dict[str, str]] = provider_fetch_many,
-) -> BindingTestResult:
-    """Exec the binding's provider and report success/failure WITHOUT
-    revealing the secret values (only their total length). Resolves every slot
-    in one batch invocation. Never raises a provider error -- it is captured
-    into the result so callers can report per-binding in a batch."""
-    # For a scripted injector, confirm the named .star resolves. The proxy
-    # compiles it at push time; host-side we can at least prove it exists, so a
-    # passing `binding test` doesn't falsely imply a missing script is fine.
-    note = None
-    if binding.injector:
+) -> list[BindingTestResult]:
+    """Dry-run a set of bindings, batching provider calls: ONE invocation per
+    distinct provider (the union of refs across the bindings that share it), so
+    a costly provider unlocks once for the whole set rather than once per
+    binding. Results stay per-binding and in input order; secret values are
+    never revealed (only their total length). Never raises a provider error --
+    each is captured into its result.
+
+      - Injector/script resolution is checked per binding (no provider call); a
+        failure there fails that binding only and skips its fetch.
+      - If a provider's batch fetch fails, the batch error can't say which ref
+        was at fault, so we re-fetch that provider's bindings individually to
+        pin the failure to the right binding(s). The provider's setup is
+        typically still warm, so this costs extra only on the error path.
+    """
+    # Phase 1: per-binding injector/script check. For a scripted injector,
+    # confirm the named .star resolves -- the proxy compiles it at push time, so
+    # a passing `binding test` shouldn't falsely imply a missing script is fine.
+    early: dict[int, BindingTestResult] = {}   # index -> pre-fetch failure
+    notes: dict[int, str] = {}                 # index -> advisory note
+    for i, b in enumerate(bindings):
+        if not b.injector:
+            continue
         try:
-            inj = find_injector(binding.injector)
+            inj = find_injector(b.injector)
         except CredproxyError as e:
-            return BindingTestResult(binding.name, False, None, str(e))
+            early[i] = BindingTestResult(b.name, False, None, str(e))
+            continue
         if inj.scheme == "script" and inj.script:
             from .scripts import find_script
             try:
                 find_script(inj.script)
-                note = f"script '{inj.script}' resolved (not compiled)"
+                notes[i] = f"script '{inj.script}' resolved (not compiled)"
             except CredproxyError as e:
-                return BindingTestResult(binding.name, False, None, str(e))
+                early[i] = BindingTestResult(b.name, False, None, str(e))
 
-    refs = secret_refs(binding)
-    try:
-        values = fetch_many(binding.provider, list(dict.fromkeys(refs.values())))
-    except CredproxyError as e:
-        return BindingTestResult(binding.name, False, None, str(e))
-    # Sum over distinct fetched values, not per-slot, so a ref shared by two
-    # slots is counted once.
-    total = sum(len(v) for v in values.values())
-    return BindingTestResult(binding.name, True, total, None, note)
+    # Phase 2: one batch fetch per provider, over the bindings that survived the
+    # injector check.
+    fetchable = [b for i, b in enumerate(bindings) if i not in early]
+    resolved: dict[str, dict[str, str]] = {}
+    degraded: set[str] = set()  # providers whose batch failed -> per-binding retry
+    for provider, refs in _refs_by_provider(fetchable).items():
+        try:
+            resolved[provider] = fetch_many(provider, refs)
+        except CredproxyError:
+            degraded.add(provider)
+
+    # Phase 3: assemble per-binding results in input order.
+    results: list[BindingTestResult] = []
+    for i, b in enumerate(bindings):
+        if i in early:
+            results.append(early[i])
+            continue
+        # Sum over distinct fetched values, not per-slot, so a ref shared by two
+        # slots is counted once.
+        distinct_refs = list(dict.fromkeys(secret_refs(b).values()))
+        if b.provider in degraded:
+            try:
+                values = fetch_many(b.provider, distinct_refs)
+            except CredproxyError as e:
+                results.append(BindingTestResult(b.name, False, None, str(e)))
+                continue
+        else:
+            values = resolved[b.provider]
+        total = sum(len(values[ref]) for ref in distinct_refs)
+        results.append(BindingTestResult(b.name, True, total, None, notes.get(i)))
+    return results
+
+
+def test_binding(
+    binding: Binding,
+    fetch_many: Callable[[str, list[str]], dict[str, str]] = provider_fetch_many,
+) -> BindingTestResult:
+    """Dry-run a single binding. Thin wrapper over `test_bindings`, kept for the
+    ad-hoc `binding test --provider ... --secret ...` probe and other
+    single-binding callers."""
+    return test_bindings([binding], fetch_many)[0]
 
 
 # ---- wire mapping (push path) -----------------------------------------------
+
+
+def config_fingerprint(bindings: list[Binding]) -> str:
+    """A stable hash of the bindings' wire METADATA -- name, hosts, scheme,
+    params, placeholder, env, provider, the secret REFS (not resolved values),
+    and a scripted injector's source. Lets the host tell whether the proxy
+    already holds the intended config WITHOUT re-resolving any secret, so it is
+    cheap (injector/script TOML reads only, never a provider call).
+
+    It deliberately excludes resolved secret VALUES, so an in-place secret
+    rotation (same ref, new value) does NOT change the fingerprint -- refresh
+    that with an explicit re-push (`enter --push` / `apply`)."""
+    import hashlib
+
+    items = []
+    for b in sorted(bindings, key=lambda x: x.name or ""):
+        injector = find_injector(b.injector)
+        entry = {
+            "name": b.name,
+            "hosts": sorted(b.hosts),
+            "scheme": injector.scheme,
+            "params": injector.params,
+            "placeholder": b.placeholder,
+            "env": b.env,
+            "provider": b.provider,
+            "secret": b.secret,
+        }
+        if injector.scheme == "script" and injector.script:
+            from .scripts import find_script
+            entry["script_source"] = find_script(injector.script).source
+        items.append(entry)
+    blob = json.dumps(items, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()
 
 
 def wire_config(
@@ -533,22 +643,30 @@ def wire_config(
     Each `secret` value is the RAW fetched value -- substitute schemes replace
     only the placeholder substring inside whatever the client sent, so any
     surrounding format ("Bearer ", a base64 blob) is handled on the wire / by
-    the scheme, not applied here. One batch provider invocation per binding.
+    the scheme, not applied here. Secrets are resolved with one provider
+    invocation per distinct provider (the union of refs across the bindings that
+    share it -- see `resolve_secrets`), so a costly provider unlocks once.
 
     `fetch_many` is injected for testing; defaults to the real provider exec.
     """
     from .scripts import find_script
 
-    wire_bindings = []
-    for b in bindings:
-        injector = find_injector(b.injector)
-        spec = injector.spec
-        if spec.uses_placeholder and b.placeholder is None:
+    prepared = [(b, find_injector(b.injector)) for b in bindings]
+    # Validate placeholders BEFORE resolving anything, so a config error aborts
+    # without first paying a provider's setup cost (e.g. unlocking a vault).
+    for b, injector in prepared:
+        if injector.spec.uses_placeholder and b.placeholder is None:
             raise ConfigError(
                 f"binding '{b.name}' has no placeholder; materialize it first"
             )
+
+    resolved = resolve_secrets(bindings, fetch_many)
+
+    wire_bindings = []
+    for b, injector in prepared:
+        spec = injector.spec
         refs = secret_refs(b)
-        values = fetch_many(b.provider, list(dict.fromkeys(refs.values())))
+        values = resolved[b.provider]
         secret = {slot: values[ref] for slot, ref in refs.items()}
         entry: dict = {
             "name": b.name,

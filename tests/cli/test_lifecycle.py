@@ -481,3 +481,56 @@ def test_run_setup_failure_raises(xdg, ws_factory, monkeypatch):
     with pytest.raises(DockerError):
         lifecycle.run_setup(ws_factory("a"), {"setup": ["false"]},
                             notify=lambda *_: None)
+
+
+# ---- smart push: fingerprint, decision, status, enter --push -----------------
+
+
+def test_config_fingerprint(xdg):
+    from dataclasses import replace
+    from credproxy_cli.core.bindings import Binding, config_fingerprint
+    b = Binding(name="x", injector="bearer", provider="env", secret="TOK",
+                hosts=("api.github.com",), placeholder="credproxy_PH", env="GH")
+    fp = config_fingerprint([b])
+    assert isinstance(fp, str) and len(fp) == 64          # sha256 hex
+    assert config_fingerprint([b]) == fp                  # deterministic
+    assert config_fingerprint([replace(b)]) == fp         # identical metadata
+    assert config_fingerprint([replace(b, hosts=("z.com",))]) != fp
+    assert config_fingerprint([replace(b, placeholder="credproxy_Q")]) != fp
+    assert config_fingerprint([replace(b, secret="OTHER_REF")]) != fp  # ref change
+
+
+def test_should_push_decision():
+    from credproxy_cli.core.lifecycle import _should_push
+    ok = {"loaded": True, "fingerprint": "x"}
+    assert _should_push(True, False, ok, "x")                       # forced
+    assert _should_push(False, True, None, "x")                     # proxy (re)started
+    assert _should_push(False, False, None, "x")                    # unreachable
+    assert _should_push(False, False, {"loaded": False}, "x")       # no config
+    assert _should_push(False, False, {"loaded": True, "fingerprint": "y"}, "x")  # drift
+    assert not _should_push(False, False, ok, "x")                  # match -> skip
+
+
+def test_proxy_status_unreachable_is_none(xdg, ws_factory):
+    from credproxy_cli.core.proxy_http import proxy_status
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    ws.token_path.write_text("tok")
+    assert proxy_status(ws, 9) is None  # nothing listening on :9
+
+
+def test_enter_push_flag_threads(xdg, ws_factory, monkeypatch):
+    from test_porcelain import _run
+    from credproxy_cli.core import lifecycle
+    ws_factory("w")
+    captured = {}
+
+    def fake_enter(ws, cmd, notify=None, user_override=None, push=False):
+        captured["push"] = push
+        return 0
+    monkeypatch.setattr(lifecycle, "enter_workspace", fake_enter)
+
+    _run(["workspace", "w", "enter", "--", "true"])
+    assert captured["push"] is False          # default: no forced push
+    _run(["workspace", "w", "enter", "--push", "--", "true"])
+    assert captured["push"] is True           # --push forces it

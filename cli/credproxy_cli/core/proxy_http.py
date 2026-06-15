@@ -47,6 +47,26 @@ def _http_post_json(url: str, body: bytes, token: str) -> tuple[int, dict]:
         raise ProxyError(f"connect error talking to the proxy: {e.reason}")
 
 
+def proxy_status(ws: Workspace, http_port: int) -> dict | None:
+    """GET /admin/config: returns {"loaded": bool, "fingerprint": str|None}, or
+    None if the proxy can't be reached or doesn't answer 200. Callers treat
+    None as 'can't confirm -> push'."""
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{http_port}/admin/config",
+        headers={"Authorization": f"Bearer {read_token(ws)}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            if resp.status == 200:
+                payload = json.loads(resp.read().decode())
+                return payload if isinstance(payload, dict) else None
+    except (urllib.error.URLError, json.JSONDecodeError, ConnectionError,
+            TimeoutError, OSError):
+        return None
+    return None
+
+
 def wait_for_ready(http_port: int, timeout: float = 15.0) -> None:
     """Poll /health until the proxy answers 200 or `timeout` elapses."""
     deadline = time.monotonic() + timeout
@@ -66,18 +86,28 @@ def wait_for_ready(http_port: int, timeout: float = 15.0) -> None:
     )
 
 
-def push_config(ws: Workspace, http_port: int, notify: Notify = _noop):
+def push_config(ws: Workspace, http_port: int, notify: Notify = _noop,
+                bindings=None, fingerprint=None):
     """Materialize bindings, fetch each secret from its provider, and POST
-    the resulting wire config to /admin/config.
+    the resulting wire config (plus a metadata `fingerprint`) to /admin/config.
 
-    Materialization may rewrite the config file (filling in generated
-    names/placeholders); that is announced via `notify`.
+    `bindings`/`fingerprint` may be supplied by the caller (the start path
+    computes them to decide whether a push is even needed); otherwise they are
+    materialized/computed here. Materialization may rewrite the config file
+    (filling generated names/placeholders); announced via `notify`.
 
     Returns the list of materialized Binding instances so the caller can
     record applied-bindings.json."""
+    from .bindings import config_fingerprint
+
     token = read_token(ws)
-    bindings = materialize_bindings(ws, notify)
-    body = json.dumps(wire_config(bindings)).encode()
+    if bindings is None:
+        bindings = materialize_bindings(ws, notify)
+    if fingerprint is None:
+        fingerprint = config_fingerprint(bindings)
+    wire = wire_config(bindings)
+    wire["fingerprint"] = fingerprint
+    body = json.dumps(wire).encode()
     status, payload = _http_post_json(
         f"http://127.0.0.1:{http_port}/admin/config", body, token
     )

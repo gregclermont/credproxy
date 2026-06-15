@@ -268,6 +268,70 @@ def test_bundled_env_provider_not_set(xdg, monkeypatch):
         fetch("env", "UNSET_CRED_ZZZQQ")
 
 
+# ---- bundled bw provider (fake `bw` on PATH, no real CLI needed) --------------
+
+
+def _fake_bw(tmp_path, items, *, status="unlocked") -> Path:
+    """Write a fake `bw` onto a fresh bin dir and return the call-log path.
+    Answers `status`/`list items`; logs every invocation so a test can assert
+    how many times the vault was actually read."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    calls = tmp_path / "bw-calls.log"
+    bw = fake_bin / "bw"
+    bw.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + chr(10))\n"
+        "arg = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+        f"if arg == 'status': print({json.dumps(json.dumps({'status': status}))})\n"
+        f"elif arg == 'list': print({json.dumps(json.dumps(items))})\n"
+        "else: sys.exit(1)\n"
+    )
+    bw.chmod(0o755)
+    return fake_bin, calls
+
+
+def test_bundled_bw_provider_batches_and_extracts(xdg, monkeypatch, tmp_path):
+    """One `bw list items` resolves a whole multi-ref batch, across password /
+    username / custom-field selectors -- the provider-side half of the batching
+    win (the costly vault decrypt happens once, not once per ref)."""
+    items = [
+        {"id": "id-gh", "name": "github",
+         "login": {"username": "octocat", "password": "ghp_tok", "uris": []},
+         "fields": []},
+        {"id": "id-aws", "name": "aws-prod", "login": {},
+         "fields": [{"name": "access_key_id", "value": "AKIA"},
+                    {"name": "secret_access_key", "value": "wJalr"}]},
+    ]
+    fake_bin, calls = _fake_bw(tmp_path, items)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    from credproxy_cli.core.providers import fetch_many
+    vals = fetch_many("bw", ["github", "github#username",
+                             "aws-prod#access_key_id", "aws-prod#secret_access_key"])
+    assert vals == {
+        "github": "ghp_tok",
+        "github#username": "octocat",
+        "aws-prod#access_key_id": "AKIA",
+        "aws-prod#secret_access_key": "wJalr",
+    }
+    # The whole batch -> a single vault read, however many refs were requested.
+    assert calls.read_text().splitlines().count("list items") == 1
+
+
+def test_bundled_bw_provider_missing_item_exit2(xdg, monkeypatch, tmp_path):
+    """An unknown item is a not-found (exit 2) -> ProviderError, not a crash."""
+    fake_bin, _ = _fake_bw(tmp_path, [{"id": "id-gh", "name": "github",
+                                       "login": {"password": "x"}, "fields": []}])
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    from credproxy_cli.core.errors import ProviderError
+    from credproxy_cli.core.providers import fetch
+    with pytest.raises(ProviderError, match="not found"):
+        fetch("bw", "ghost")
+
+
 # ---- list_providers ----------------------------------------------------------
 
 
@@ -296,6 +360,9 @@ def test_bundled_providers_describe(xdg):
     assert desc["env"] == "Host environment variables"
     assert desc["op"] == "1Password (op CLI)"
     assert desc["keychain"]  # non-empty
+    # bw's describe is static -- it must NOT shell out to `bw` (so `provider
+    # list` never pops an unlock prompt), hence this passes with no bw on PATH.
+    assert desc["bw"] == "Bitwarden (bw CLI)"
 
 
 def test_user_provider_describe_supported(xdg):
