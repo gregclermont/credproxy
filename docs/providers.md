@@ -139,6 +139,19 @@ shells out. It pairs with the `github` preset, which defaults its provider to
 `gh-cli` and its secret to `github.com`, so `binding add --preset github` wires
 GitHub API + git + ghcr off one existing login with no further flags.
 
+The bundled `docker-credential` provider adapts any `docker-credential-*` helper
+for registry auth: the ref is a registry host (the helper is resolved from
+`${DOCKER_CONFIG:-~/.docker}/config.json` — `credHelpers[host]`, else
+`credsStore`) or an explicit `<helper>|<host>`. It returns the helper's `Secret`
+and pairs with the `basic` scheme. **Caveat:** `basic` swaps the password
+component by position, so the **username is not injected** — the workspace must
+send the username the registry expects (e.g. `AWS` for ECR) with the placeholder
+in the password slot. It covers only the credential-*helper* mechanism, not the
+static base64 `auths` a plain `docker login` may write. The helper protocol is
+per-host, so unlike `bw`'s one-unlock-per-resolve a vault-backed helper prompts
+once per distinct host; the config is still read once per invocation and
+identical `(helper, host)` refs are de-duped.
+
 ## Example: the bundled `env` provider
 
 The simplest possible provider reads host environment variables named by the

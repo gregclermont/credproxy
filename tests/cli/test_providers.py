@@ -399,6 +399,102 @@ def test_bundled_gh_cli_provider_unknown_host_exit2(xdg, monkeypatch, tmp_path):
         fetch("gh-cli", "ghe.example.invalid")
 
 
+# ---- bundled docker-credential provider (fake helper + DOCKER_CONFIG) ---------
+
+
+def _fake_docker_helper(tmp_path, creds, *, helper="faux", creds_store=None,
+                        cred_helpers=None) -> Path:
+    """Write a fake `docker-credential-<helper>` on a fresh bin dir and a
+    DOCKER_CONFIG/config.json. The binary name (`helper`) is independent of the
+    config's `credsStore` (defaults to `helper`) and `credHelpers`, so a test
+    can point credHelpers at the real binary while credsStore names a missing
+    one. The helper reads the host on stdin and emits the helper-protocol JSON
+    for a known host, exiting 1 otherwise; it logs each invocation. Returns
+    (bin_dir, config_dir, calls_log)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    cfg_dir = tmp_path / "docker"
+    cfg_dir.mkdir(exist_ok=True)
+    calls = tmp_path / "helper-calls.log"
+    exe = bin_dir / f"docker-credential-{helper}"
+    exe.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, json\n"
+        f"open({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + chr(10))\n"
+        "host = sys.stdin.read().strip()\n"
+        f"creds = {json.dumps(creds)}\n"
+        "if sys.argv[1:2] != ['get'] or host not in creds: sys.exit(1)\n"
+        "json.dump({'ServerURL': host, 'Username': 'u', 'Secret': creds[host]},"
+        " sys.stdout)\n"
+    )
+    exe.chmod(0o755)
+    config = {"credsStore": creds_store if creds_store is not None else helper}
+    if cred_helpers:
+        config["credHelpers"] = cred_helpers
+    (cfg_dir / "config.json").write_text(json.dumps(config))
+    return bin_dir, cfg_dir, calls
+
+
+def _use_docker(monkeypatch, bin_dir, cfg_dir):
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("DOCKER_CONFIG", str(cfg_dir))
+
+
+def test_docker_credential_explicit_helper(xdg, monkeypatch, tmp_path):
+    """`<helper>|<host>` runs that helper and returns its Secret -- no config
+    lookup needed."""
+    bin_dir, cfg_dir, _ = _fake_docker_helper(tmp_path, {"ghcr.io": "ghp_sekret"})
+    _use_docker(monkeypatch, bin_dir, cfg_dir)
+
+    from credproxy_cli.core.providers import fetch
+    assert fetch("docker-credential", "faux|ghcr.io") == "ghp_sekret"
+
+
+def test_docker_credential_auto_credsstore(xdg, monkeypatch, tmp_path):
+    """A bare host resolves its helper from credsStore in the docker config."""
+    bin_dir, cfg_dir, _ = _fake_docker_helper(tmp_path, {"ghcr.io": "tok"})
+    _use_docker(monkeypatch, bin_dir, cfg_dir)
+
+    from credproxy_cli.core.providers import fetch
+    assert fetch("docker-credential", "ghcr.io") == "tok"
+
+
+def test_docker_credential_auto_credhelpers_wins(xdg, monkeypatch, tmp_path):
+    """credHelpers[host] takes precedence over credsStore for the helper name."""
+    # binary is docker-credential-faux; credsStore names a MISSING helper, so a
+    # `tok` result proves credHelpers[ghcr.io]=faux was used, not credsStore.
+    bin_dir, cfg_dir, _ = _fake_docker_helper(
+        tmp_path, {"ghcr.io": "tok"}, helper="faux", creds_store="missing-store",
+        cred_helpers={"ghcr.io": "faux"})
+    _use_docker(monkeypatch, bin_dir, cfg_dir)
+
+    from credproxy_cli.core.providers import fetch
+    assert fetch("docker-credential", "ghcr.io") == "tok"
+
+
+def test_docker_credential_no_helper_for_host_exit2(xdg, monkeypatch, tmp_path):
+    """A bare host with no credHelpers/credsStore entry is a not-found."""
+    (tmp_path / "docker").mkdir()  # empty config dir -> no config.json
+    monkeypatch.setenv("DOCKER_CONFIG", str(tmp_path / "docker"))
+
+    from credproxy_cli.core.errors import ProviderError
+    from credproxy_cli.core.providers import fetch
+    with pytest.raises(ProviderError, match="not found"):
+        fetch("docker-credential", "ghcr.io")
+
+
+def test_docker_credential_dedups_same_helper_host(xdg, monkeypatch, tmp_path):
+    """`ghcr.io` and `faux|ghcr.io` resolve to the same (helper, host), so the
+    helper runs once even though they are distinct ref strings."""
+    bin_dir, cfg_dir, calls = _fake_docker_helper(tmp_path, {"ghcr.io": "tok"})
+    _use_docker(monkeypatch, bin_dir, cfg_dir)
+
+    from credproxy_cli.core.providers import fetch_many
+    vals = fetch_many("docker-credential", ["ghcr.io", "faux|ghcr.io"])
+    assert vals == {"ghcr.io": "tok", "faux|ghcr.io": "tok"}
+    assert calls.read_text().count("get") == 1
+
+
 # ---- list_providers ----------------------------------------------------------
 
 
@@ -432,6 +528,8 @@ def test_bundled_providers_describe(xdg):
     assert desc["bw"] == "Bitwarden (bw CLI)"
     # gh-cli's describe is likewise static (no `gh` call on list).
     assert desc["gh-cli"] == "GitHub auth token (gh CLI)"
+    # docker-credential's describe reads neither the docker config nor a helper.
+    assert desc["docker-credential"] == "Docker credential helper (registry auth)"
 
 
 def test_user_provider_describe_supported(xdg):
