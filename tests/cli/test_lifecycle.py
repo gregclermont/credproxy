@@ -111,6 +111,19 @@ def test_host_uid_gid_injected_into_workspace_env(xdg, ws_factory, monkeypatch):
     assert f"CREDPROXY_HOST_GID={os.getgid()}" in args
 
 
+def test_workspace_name_injected_into_workspace_env(xdg, ws_factory, monkeypatch):
+    """The workspace gets CREDPROXY_WORKSPACE=<name> so setup scripts / shell rc
+    can read the name (e.g. a prompt label) instead of templating the literal."""
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": []}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    args = calls[-1]
+    assert f"CREDPROXY_WORKSPACE={ws.name}" in args
+
+
 def test_config_env_overrides_host_uid_breadcrumb(xdg, ws_factory, monkeypatch):
     """A user's `env` is applied after the breadcrumbs, so it wins (last -e)."""
     from credproxy_cli.core import lifecycle
@@ -179,13 +192,17 @@ def test_run_flags_userns_overrides_map_host_user(xdg, ws_factory, monkeypatch):
     ws = ws_factory("a")
     ws.ensure_state_dir()
     calls = _capture_docker_args(monkeypatch)
+    keepid = f"--userns=keep-id:uid={os.getuid()},gid={os.getgid()}"
+    # A DISTINCT userns so it can never collide with the getuid-derived keep-id
+    # above -- otherwise args.index() can't tell the two positions apart when the
+    # runner's own uid matches a hardcoded value (e.g. uid 1000 inside a
+    # credproxy workspace, where this suite would otherwise fail spuriously).
+    override = f"--userns=keep-id:uid={os.getuid() + 1},gid={os.getgid() + 1}"
     cfg = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": [],
            "user": "vscode", "map_host_user": True,
-           "run_flags": ["--userns=keep-id:uid=1000,gid=1000"]}
+           "run_flags": [override]}
     lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
     args = calls[-1]
-    keepid = f"--userns=keep-id:uid={os.getuid()},gid={os.getgid()}"
-    override = "--userns=keep-id:uid=1000,gid=1000"
     # both present; run_flags override comes AFTER keep-id (docker last-wins)
     assert args.index(override) > args.index(keepid)
     # ...but still before the structural flags (netns protected)

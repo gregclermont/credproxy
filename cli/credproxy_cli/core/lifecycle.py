@@ -313,6 +313,11 @@ def create_ws_container(
     # having to trip a TLS-interception error and investigate it. Points at the
     # agent-facing guidance; /etc/hosts already resolves proxy.local.
     args += ["-e", "CREDPROXY_SETUP=http://proxy.local/llms.txt"]
+    # The workspace's own name, also available via /setup. Handy for setup
+    # scripts and shell rc (e.g. a prompt label) that would otherwise template
+    # the literal name. Stable per workspace, so (like CREDPROXY_SETUP) it's not
+    # part of the spec hash -- an existing container picks it up on next recreate.
+    args += ["-e", f"CREDPROXY_WORKSPACE={ws.name}"]
     # Host identity breadcrumb: the uid/gid the CLI runs as -- i.e. the owner of
     # the user's bind-mounted project dirs. `setup` can match a non-root user to
     # it (`useradd -u $CREDPROXY_HOST_UID dev`) so that user can read/write the
