@@ -1,10 +1,14 @@
 # credproxy bundled injector: jwt-bearer
 #
-# Self-signed JWT bearer assertion (RS256). The proxy mints a fresh JWT on
-# every intercepted request, signed with an RSA private key sourced from the
-# provider, and sets Authorization: Bearer <jwt>. The private key never transits
-# the wire. Covers GCP service-account direct auth and RFC 7523 private-key
-# JWT assertions accepted by other APIs.
+# Self-signed JWT bearer assertion (RS256). By default the proxy mints a fresh
+# JWT on every intercepted request, signed with an RSA private key sourced from
+# the provider, and sets Authorization: Bearer <jwt>. The private key never
+# transits the wire. Covers GCP service-account direct auth and RFC 7523
+# private-key JWT assertions accepted by other APIs.
+#
+# Optionally set a `placeholder` on the binding: the workspace then sends
+# `Authorization: Bearer <placeholder>` and the proxy mints only for requests
+# carrying it -- enabling per-request opt-in and several identities on one host.
 #
 # Single slot: "private_key" (PEM-encoded RSA private key). Because it is NOT
 # named "value", you must name the slot explicitly when binding:

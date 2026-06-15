@@ -14,7 +14,15 @@
 #       --secret private_key=<REF> \
 #       --host api.example.com
 #
-# family = "sign": the private key never transits the wire; no placeholder swap.
+# family = "sign": the private key never transits the wire.
+#
+# Placeholder (optional). With no placeholder the script mints on EVERY matching
+# request (the classic from-scratch sign behavior). When the binding declares a
+# placeholder, the workspace sends `Authorization: Bearer <placeholder>` and the
+# script mints ONLY for requests that carry it -- giving per-request opt-in and
+# letting the proxy run several identities on one host (the config `by_ph` layer
+# disambiguates by which placeholder a request carries).
+#
 # Params (all optional, defaults shown in jwt-bearer.toml):
 #   iss   - JWT issuer claim  (e.g. "my-service@project.iam.gserviceaccount.com")
 #   aud   - JWT audience claim (e.g. "https://api.example.com/token")
@@ -22,6 +30,13 @@
 #   sub   - subject claim; omitted from JWT when empty (default "")
 
 def on_request():
+    # Optional placeholder gate: when set, only mint for requests carrying it.
+    ph = placeholder()
+    if ph != None:
+        auth = req_header("Authorization")
+        if auth == None or ph not in auth:
+            return False
+
     iat = now()
     exp = iat + int(param("ttl", "3600"))
 

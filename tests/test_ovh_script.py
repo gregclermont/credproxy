@@ -66,6 +66,33 @@ def test_ovh_signs_hostname_not_ip():
     assert req.headers["X-Ovh-Signature"] == expected_sig
 
 
+def test_ovh_placeholder_present_signs_and_overwrites_app():
+    """With a placeholder, the workspace presents it as X-Ovh-Application; the
+    proxy signs and overwrites the four headers with the real app key."""
+    s = _scheme()
+    req = tutils.treq(host="eu.api.ovh.com", method=b"GET", path=b"/1.0/me", content=b"")
+    req.headers.clear()
+    req.headers["host"] = "eu.api.ovh.com"
+    req.headers["X-Ovh-Application"] = "PLACEHOLDER-APP"
+    ctx = schemes.RequestCtx(req, _secrets(), {}, "PLACEHOLDER-APP")
+
+    assert s.on_request(ctx) is True
+    assert req.headers["X-Ovh-Application"] == "AK"   # placeholder -> real app key
+    assert "X-Ovh-Signature" in req.headers
+
+
+def test_ovh_placeholder_mismatch_skips():
+    """No / wrong X-Ovh-Application -> not our request; add no signature."""
+    s = _scheme()
+    req = tutils.treq(host="eu.api.ovh.com", method=b"GET", path=b"/1.0/me", content=b"")
+    req.headers.clear()
+    req.headers["host"] = "eu.api.ovh.com"   # no X-Ovh-Application presented
+    ctx = schemes.RequestCtx(req, _secrets(), {}, "PLACEHOLDER-APP")
+
+    assert s.on_request(ctx) is False
+    assert "X-Ovh-Signature" not in req.headers
+
+
 def test_ovh_post_with_body():
     s = _scheme()
     body = '{"description":"test"}'
