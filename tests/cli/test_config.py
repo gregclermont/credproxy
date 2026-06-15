@@ -291,6 +291,37 @@ def test_render_template_defaults_apply(xdg, workspaces_dir):
     assert cfg["setup"] == []
 
 
+def test_render_template_default_image_wires_nonroot_user(xdg, workspaces_dir):
+    """For the default (devcontainers) image, the scaffold activates the
+    non-root vscode user, its home, and map_host_user -- no edits needed."""
+    from credproxy_cli.core.config import load_config, render_template
+    from credproxy_cli.core.paths import (
+        DEFAULT_WORKSPACE_IMAGE, DEFAULT_WORKSPACE_USER, DEFAULT_WORKSPACE_USER_HOME)
+    from credproxy_cli.core.workspace import Workspace
+
+    text = render_template("dc", DEFAULT_WORKSPACE_IMAGE)
+    (workspaces_dir / "dc.toml").write_text(text)
+    cfg = load_config(Workspace("dc"))
+    assert cfg["user"] == DEFAULT_WORKSPACE_USER
+    assert cfg["home"] == DEFAULT_WORKSPACE_USER_HOME
+    assert cfg["map_host_user"] is True
+
+
+def test_render_template_custom_image_keeps_user_commented(xdg, workspaces_dir):
+    """A --image override doesn't know the image's user, so user/home/
+    map_host_user stay commented (root default, generic home)."""
+    from credproxy_cli.core.config import load_config, render_template
+    from credproxy_cli.core.paths import DEFAULT_HOME
+    from credproxy_cli.core.workspace import Workspace
+
+    text = render_template("custom", "alpine:3")
+    (workspaces_dir / "custom.toml").write_text(text)
+    cfg = load_config(Workspace("custom"))
+    assert cfg["user"] is None
+    assert cfg["home"] == DEFAULT_HOME
+    assert cfg["map_host_user"] is False
+
+
 # ---- spec hash ---------------------------------------------------------------
 
 
@@ -323,12 +354,13 @@ def test_spec_hash_changes_on_proxy_id(xdg):
 
 
 def test_spec_hash_ignores_user_and_exec_flags(xdg):
-    """user/exec_flags are exec-only -> changing them must NOT change the spec
-    hash (no container recreate)."""
+    """user/exec_flags/workdir are exec-only -> changing them must NOT change the
+    spec hash (no container recreate)."""
     from credproxy_cli.core.config import workspace_spec_hash
 
     base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
-    withuser = {**base, "user": "dev", "exec_flags": ["--workdir", "/srv"]}
+    withuser = {**base, "user": "dev", "exec_flags": ["--workdir", "/srv"],
+                "workdir": "/code"}
     assert workspace_spec_hash(base, "p") == workspace_spec_hash(withuser, "p")
 
 
@@ -385,6 +417,34 @@ def test_load_config_exec_flags_not_list_of_strings(xdg, workspaces_dir):
 
     _write(workspaces_dir, "b", 'image = "alpine:3"\nexec_flags = [1, 2]\n')
     with pytest.raises(ConfigError, match="`exec_flags` must be an array of strings"):
+        load_config(Workspace("b"))
+
+
+# ---- workdir -----------------------------------------------------------------
+
+
+def test_load_config_workdir(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "w", 'image = "alpine:3"\nworkdir = "/code"\n')
+    assert load_config(Workspace("w"))["workdir"] == "/code"
+
+
+def test_load_config_workdir_default(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "wd", 'image = "alpine:3"\n')
+    assert load_config(Workspace("wd"))["workdir"] is None
+
+
+def test_load_config_workdir_not_absolute(xdg, workspaces_dir):
+    from credproxy_cli.core.config import ConfigError, load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nworkdir = "relative"\n')
+    with pytest.raises(ConfigError, match="`workdir` must be an absolute path"):
         load_config(Workspace("b"))
 
 

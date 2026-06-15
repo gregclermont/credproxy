@@ -206,8 +206,8 @@ def test_injector_add_still_requires_provider(ws_factory):
 def test_template_uses_real_injector_and_verb_order(ws_factory):
     """The template must not present the `github` PRESET as an injector, and
     must use the canonical `workspace NAME start` verb order."""
-    from credproxy_cli.core.config import CONFIG_TEMPLATE
-    rendered = CONFIG_TEMPLATE.format(name="demo", image="python:3.12-slim")
+    from credproxy_cli.core.config import render_template
+    rendered = render_template("demo", "python:3.12-slim")
     assert 'injector = "github"' not in rendered
     assert 'injector = "bearer"' in rendered
     assert "credproxy workspace demo start" in rendered

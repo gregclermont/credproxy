@@ -92,5 +92,13 @@ def workspaces_state_dir() -> Path:
 # CLI-only conventions.
 IMAGE_TAG = "credproxy:dev"
 DEFAULT_WORKSPACE = "default"
-DEFAULT_WORKSPACE_IMAGE = "python:3.12-slim"
-DEFAULT_HOME = "/root"
+# The default workspace image is a devcontainers base: it ships a non-root sudo
+# user (`vscode`, uid 1000) plus curl + ca-certificates, so the documented
+# bootstrap (`curl ... | sh`) and a non-root shell work with no setup. The
+# scaffold wires up the matching `user`/`home` when this image is the default
+# (see render_template); a `--image` override falls back to the generic, all-
+# commented template since its user is unknown.
+DEFAULT_WORKSPACE_IMAGE = "mcr.microsoft.com/devcontainers/base:ubuntu"
+DEFAULT_WORKSPACE_USER = "vscode"
+DEFAULT_WORKSPACE_USER_HOME = "/home/vscode"
+DEFAULT_HOME = "/root"  # generic fallback when `home` is omitted (custom images)

@@ -30,15 +30,25 @@ the tests isolate themselves).
 A complete example, with every key shown:
 
 ```toml
-# Workspace container image.
-image = "python:3.12-slim"
+# Workspace container image. The default ships a non-root sudo user (vscode).
+image = "mcr.microsoft.com/devcontainers/base:ubuntu"
 
-# Where the persistent home volume mounts inside the workspace.
-home = "/root"
+# Where the persistent home volume mounts inside the workspace. Point it at the
+# user's home so the volume is their home (the default image pre-creates
+# /home/vscode owned by vscode, so it seeds correctly — no chown needed).
+home = "/home/vscode"
 
-# User that `enter` runs as (docker exec -u). Must exist in the image or be
-# created by `setup` (which runs as root). Exec-only — no recreate.
-user = "dev"
+# User that `enter` runs as (docker exec -u). Must exist in the image (the
+# default image ships `vscode`, uid 1000, passwordless sudo) or be created by
+# `setup` (which runs as root). Exec-only — no recreate.
+user = "vscode"
+
+# Directory `enter` starts in (the workspaceFolder analog). Defaults to `home`.
+workdir = "/code"
+
+# Make `user` own the bind mounts without changing host ownership; credproxy
+# picks the per-runtime lever. No-op unless `user` is set. Recreates on change.
+map_host_user = true
 
 # Escape hatch: extra flags spliced into `docker exec` for `enter`.
 # credproxy keeps control of -i/-t/-d. Exec-only.
@@ -47,7 +57,7 @@ exec_flags = ["--workdir", "/srv"]
 # Host paths bind-mounted in. Each entry is "SRC:DST" or "SRC:DST:ro".
 mounts = [
   "~/code:/code",
-  "~/.gitconfig:/root/.gitconfig:ro",
+  "~/.gitconfig:/home/vscode/.gitconfig:ro",
 ]
 
 # Environment variables set in the workspace container.
@@ -85,7 +95,7 @@ hosts    = ["sts.amazonaws.com"]
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `image` | string | `python:3.12-slim` | The workspace container image — your own image; never modified or privileged. |
+| `image` | string | `mcr.microsoft.com/devcontainers/base:ubuntu` | The workspace container image — your own image; never modified or privileged. The default is a devcontainers base that ships a non-root sudo user (`vscode`, uid 1000) plus curl + ca-certificates, so the bootstrap and a non-root shell work with no setup; `credproxy create` scaffolds the matching `user`/`home`/`map_host_user`. A `--image` override leaves those commented (its user is unknown). |
 | `home` | string | `/root` | Mount point of the persistent home volume inside the container. Must be absolute. The volume survives stop/start and recreate; it is removed only by `delete`. |
 | `mounts` | list of strings | `[]` | Each entry is `"SRC:DST"` or `"SRC:DST:ro"`. `~` is expanded on `SRC`; `SRC` must be an existing absolute path, `DST` must be absolute. `:ro` makes the mount read-only. |
 | `env` | table (string → string) | `{}` | Passed to the container as `-e KEY=VALUE`. Both keys and values must be strings. |
@@ -108,6 +118,7 @@ These shape how `enter` runs commands in the container; they are **exec-only**
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `user` | string | image default (root) | Runs `enter` (and `enter -- cmd`) as this user via `docker exec -u`. The user must exist in the image — built in, or created by `setup`, which always runs as **root** (so it can `useradd`, add sudoers, and `chown` the home volume to the user). `enter --user NAME` overrides it for one session (e.g. `enter --user root` for a debug shell). |
+| `workdir` | string | `home` | Directory `enter` starts in (`docker exec --workdir`) — the `workspaceFolder` analog. Defaults to `home`, so you land in your home dir rather than the image's `WORKDIR` (`/` on the devcontainers base); point it at a bind-mounted project to land there. Must be absolute. A `--workdir` in `exec_flags` still overrides it (docker last-wins). |
 | `exec_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the `docker exec` for `enter` (e.g. `["--workdir", "/srv"]`, `["--env", "FOO=bar"]`). credproxy keeps ownership of the session-control flags (`-i`/`-t`/`-d`), so these can't detach the session or break auto-stop. |
 
 `setup` runs as root regardless of `user`, so it is the place to provision a

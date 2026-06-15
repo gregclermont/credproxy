@@ -5,7 +5,7 @@ Config is stored at $XDG_CONFIG_HOME/credproxy/workspaces/<name>.toml and
 parsed with stdlib `tomllib` (Python 3.11+). No external dependencies.
 
 Schema:
-  image  = "python:3.12-slim"          # str, optional (default applied)
+  image  = "mcr.microsoft.com/devcontainers/base:ubuntu"  # str, optional (default)
   home   = "/root"                     # str, optional (default applied)
   mounts = ["~/src:/src"]              # list[str] "SRC:DST" or "SRC:DST:ro"
   env    = { KEY = "value" }           # table, optional; passed as -e to ws
@@ -13,6 +13,7 @@ Schema:
   run_flags = ["--userns=keep-id"]     # list[str], optional; spliced into docker run
   map_host_user = true                 # bool, optional; non-root `user` owns mounts
   user   = "dev"                       # str, optional; user `enter` execs as
+  workdir = "/code"                    # str, optional; dir `enter` starts in
 
   [[binding]]                          # zero or more; see core/bindings.py
   injector = "bearer"
@@ -32,7 +33,12 @@ from pathlib import Path
 
 from .errors import ConfigError
 from .workspace import Workspace
-from .paths import DEFAULT_HOME, DEFAULT_WORKSPACE_IMAGE
+from .paths import (
+    DEFAULT_HOME,
+    DEFAULT_WORKSPACE_IMAGE,
+    DEFAULT_WORKSPACE_USER,
+    DEFAULT_WORKSPACE_USER_HOME,
+)
 
 import tomllib
 
@@ -46,22 +52,31 @@ CONFIG_TEMPLATE = """\
 # workspace container on the next `start`.
 image = "{image}"
 
-# Where the persistent home volume mounts inside the workspace.
-# home = "/root"
+# Where the persistent home volume mounts inside the workspace. Point this at
+# the `user` below so their home is the persistent volume (the default image
+# pre-creates /home/vscode owned by vscode, so it seeds correctly -- no chown).
+{home_line}
 
 # User that `enter` runs as (docker exec -u). The user must exist in the
-# image -- built in, or created by `setup` (which always runs as root, so it
+# image -- built in (the default image ships `vscode`, uid 1000, with
+# passwordless sudo), or created by `setup` (which always runs as root, so it
 # can `useradd` + chown the home volume). Exec-only: changing it never
 # recreates the container, and `enter --user NAME` overrides it per session.
-# user = "dev"
+{user_line}
 
 # Make the non-root `user` above own your bind mounts, without changing
 # ownership on the host. credproxy picks the runtime-appropriate lever:
 # --userns=keep-id on rootless podman; on Docker the matching uid does it
-# (create the user as $CREDPROXY_HOST_UID in `setup`). No-op unless `user` is
-# set. Recreates the container on change. Don't combine with a --userns in
-# run_flags -- pick one owner of the user namespace.
-# map_host_user = true
+# (the default `vscode` is uid 1000; on a custom image create the user as
+# $CREDPROXY_HOST_UID in `setup`). No-op unless `user` is set. Recreates the
+# container on change. Don't combine with a --userns in run_flags -- pick one
+# owner of the user namespace.
+{map_line}
+
+# Directory `enter` starts in (the workspaceFolder analog). Defaults to `home`,
+# so you land in your home dir rather than the image's WORKDIR; point it at a
+# bind-mounted project to land there instead. Exec-only -- no recreate.
+# workdir = "/code"
 
 # Escape hatch: extra flags spliced into `docker exec` for `enter`
 # (e.g. a working dir or env). credproxy keeps control of -i/-t/-d. Exec-only.
@@ -212,6 +227,15 @@ def load_config(ws: Workspace) -> dict:
     if not isinstance(exec_flags, list) or not all(isinstance(f, str) for f in exec_flags):
         raise ConfigError(f"{ws.config_path}: `exec_flags` must be an array of strings")
 
+    # workdir: directory `enter` starts in (docker exec --workdir), defaulting to
+    # `home` at exec time. The workspaceFolder analog -- so `enter` lands in your
+    # project (or home) rather than the image's WORKDIR. Exec-only (it's where
+    # the exec starts, not a container change), so NOT part of the spec hash; a
+    # --workdir in `exec_flags` still overrides it (docker last-wins).
+    workdir = raw.get("workdir")
+    if workdir is not None and (not isinstance(workdir, str) or not workdir.startswith("/")):
+        raise ConfigError(f"{ws.config_path}: `workdir` must be an absolute path")
+
     # run_flags: escape hatch -- extra flags spliced into the workspace
     # `docker run` (e.g. ["--userns=keep-id:uid=1000,gid=1000"] for rootless
     # podman, or a custom idmapped mount). Unlike `exec_flags`, these shape the
@@ -239,6 +263,7 @@ def load_config(ws: Workspace) -> dict:
         "env": env,
         "setup": setup,
         "user": user,
+        "workdir": workdir,
         "exec_flags": exec_flags,
         "run_flags": run_flags,
         "map_host_user": map_host_user,
@@ -276,4 +301,20 @@ def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
 
 
 def render_template(name: str, image: str) -> str:
-    return CONFIG_TEMPLATE.format(name=name, image=image)
+    """Scaffold a workspace TOML. For the default image (a devcontainers base
+    that ships the `vscode` sudo user) the user/home/map_host_user settings are
+    written ACTIVE, so a fresh workspace lands in a non-root sudo shell that owns
+    its bind mounts with no extra config. For a `--image` override the user is
+    unknown, so those lines stay commented hints."""
+    if image == DEFAULT_WORKSPACE_IMAGE:
+        home_line = f'home = "{DEFAULT_WORKSPACE_USER_HOME}"'
+        user_line = f'user = "{DEFAULT_WORKSPACE_USER}"'
+        map_line = "map_host_user = true"
+    else:
+        home_line = '# home = "/root"'
+        user_line = '# user = "dev"'
+        map_line = "# map_host_user = true"
+    return CONFIG_TEMPLATE.format(
+        name=name, image=image,
+        home_line=home_line, user_line=user_line, map_line=map_line,
+    )

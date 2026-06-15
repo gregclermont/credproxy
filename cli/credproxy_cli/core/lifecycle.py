@@ -856,11 +856,18 @@ def _enter_exec_cmd(cfg: dict, container: str, cmd: list[str], *,
 
     Ordering exploits docker's last-wins flag parsing to keep credproxy in
     control of session behaviour while still honouring `user` + the `exec_flags`
-    escape hatch: config `user`, then `exec_flags` (may override -u or add
-    -w/-e), then the per-session `user_override`, then credproxy's session-control
-    flags as EXPLICIT booleans last -- so a stray -d/-t/-i in `exec_flags` can't
-    detach the session or break pidfile/auto-stop tracking."""
+    escape hatch: the default `--workdir` (config `workdir`, else `home`), then
+    config `user`, then `exec_flags` (may override -w/-u or add -e), then the
+    per-session `user_override`, then credproxy's session-control flags as
+    EXPLICIT booleans last -- so a stray -d/-t/-i in `exec_flags` can't detach
+    the session or break pidfile/auto-stop tracking, and a -w there still wins."""
     out = ["docker", "exec"]
+    # Land in `workdir` (the workspaceFolder analog), defaulting to `home`, so
+    # enter drops you in your project/home rather than the image's WORKDIR.
+    # Emitted before exec_flags so a --workdir there still wins (docker last-wins).
+    workdir = cfg.get("workdir") or cfg.get("home")
+    if workdir:
+        out += ["--workdir", workdir]
     if cfg.get("user") and not user_override:
         out += ["-u", cfg["user"]]
     out += cfg.get("exec_flags") or []
