@@ -14,6 +14,7 @@ Schema:
   map_host_user = true                 # bool, optional; non-root `user` owns mounts
   user   = "dev"                       # str, optional; user `enter` execs as
   workdir = "/code"                    # str, optional; dir `enter` starts in
+  enter_prelude = "..."                # str, optional; shell run before exec on enter
 
   [[binding]]                          # zero or more; see core/bindings.py
   injector = "bearer"
@@ -77,6 +78,13 @@ image = "{image}"
 # so you land in your home dir rather than the image's WORKDIR; point it at a
 # bind-mounted project to land there instead. Exec-only -- no recreate.
 # workdir = "/code"
+
+# `enter` env shim. By default credproxy wraps the enter command in
+# `sh -c '<prelude>; exec "$@"'`, sourcing the proxy's CA-env file so HTTPS-CA
+# env vars reach an interactive shell, `enter -- cmd`, AND subprocesses (docker
+# exec is a bare execve -- no shell init). Override the snippet here, or set it
+# to "" to skip wrapping entirely (direct execve). Exec-only -- no recreate.
+# enter_prelude = ". /etc/profile.d/credproxy.sh 2>/dev/null"
 
 # Escape hatch: extra flags spliced into `docker exec` for `enter`
 # (e.g. a working dir or env). credproxy keeps control of -i/-t/-d. Exec-only.
@@ -231,6 +239,16 @@ def load_config(ws: Workspace) -> dict:
     if workdir is not None and (not isinstance(workdir, str) or not workdir.startswith("/")):
         raise ConfigError(f"{ws.config_path}: `workdir` must be an absolute path")
 
+    # enter_prelude: escape hatch over the `enter` env shim. By default credproxy
+    # wraps the enter command in `sh -c '<prelude>; exec "$@"'`, where the prelude
+    # sources the proxy's CA-env file -- so the env reaches an interactive shell,
+    # `enter -- cmd`, and subprocesses alike (docker exec is a bare execve). This
+    # overrides that snippet; set it to "" to skip wrapping (direct execve).
+    # Exec-only -> not part of the spec hash.
+    enter_prelude = raw.get("enter_prelude")
+    if enter_prelude is not None and not isinstance(enter_prelude, str):
+        raise ConfigError(f"{ws.config_path}: `enter_prelude` must be a string")
+
     # run_flags: escape hatch -- extra flags spliced into the workspace
     # `docker run` (e.g. ["--userns=keep-id:uid=1000,gid=1000"] for rootless
     # podman, or a custom idmapped mount). Unlike `exec_flags`, these shape the
@@ -259,10 +277,25 @@ def load_config(ws: Workspace) -> dict:
         "setup": setup,
         "user": user,
         "workdir": workdir,
+        "enter_prelude": enter_prelude,
         "exec_flags": exec_flags,
         "run_flags": run_flags,
         "map_host_user": map_host_user,
     }
+
+
+def declared_config(ws: Workspace) -> dict:
+    """The container-side settings literally present in the TOML, before any
+    defaults are applied -- the raw declaration, for `config --declared`.
+    Excludes the `[[binding]]` array (shown by `binding list`). Raises
+    ConfigError on a missing file or parse error."""
+    if not ws.exists():
+        raise ConfigError(f"workspace '{ws.name}' not found (no {ws.config_path})")
+    try:
+        raw = tomllib.loads(ws.config_path.read_text())
+    except Exception as e:
+        raise ConfigError(f"{ws.config_path}: TOML parse error: {e}") from e
+    return {k: v for k, v in raw.items() if k != "binding"}
 
 
 def quick_image(ws: Workspace) -> str:

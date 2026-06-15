@@ -108,6 +108,19 @@ class Renderer:
     def scaffolded(self, kind: str, name: str, path: str) -> None:
         print(f"scaffolded {kind} '{name}' at {path}")
 
+    # -- config --
+    def config(self, data: dict) -> None:
+        print(f"# {data['mode']} config  ({data['config_path']})")
+        for k, v in data["config"].items():
+            if isinstance(v, (dict, list)):
+                import json as _json
+                v = _json.dumps(v)
+            elif v is None:
+                v = "(unset)"
+            elif isinstance(v, bool):
+                v = "true" if v else "false"
+            print(f"{k} = {v}")
+
     # -- inspect --
     def inspect(self, data: dict) -> None:
         print(f"workspace   {data['name']}")
@@ -330,6 +343,9 @@ class JsonRenderer(Renderer):
 
     def scaffolded(self, kind: str, name: str, path: str) -> None:
         self._emit({"kind": kind, "name": name, "path": path})
+
+    def config(self, data: dict) -> None:
+        self._emit(data)
 
     def inspect(self, data: dict) -> None:
         # Strip the internal _running hint before emitting.

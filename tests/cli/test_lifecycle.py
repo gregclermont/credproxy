@@ -602,6 +602,24 @@ def _fake_run(calls, code=0):
     return run
 
 
+def test_effective_config_resolves_enter_time_defaults(xdg):
+    """effective_config fills the enter-time defaults so they aren't null:
+    workdir -> home, enter_prelude -> the default shim snippet."""
+    from credproxy_cli.core.lifecycle import effective_config, DEFAULT_ENTER_PRELUDE
+    cfg = {"home": "/home/vscode", "workdir": None, "enter_prelude": None}
+    eff = effective_config(cfg)
+    assert eff["workdir"] == "/home/vscode"
+    assert eff["enter_prelude"] == DEFAULT_ENTER_PRELUDE
+
+
+def test_effective_config_preserves_explicit_values(xdg):
+    """Explicit values win, including an explicit "" enter_prelude (shim off)."""
+    from credproxy_cli.core.lifecycle import effective_config
+    eff = effective_config({"home": "/home/vscode", "workdir": "/code", "enter_prelude": ""})
+    assert eff["workdir"] == "/code"
+    assert eff["enter_prelude"] == ""
+
+
 def test_run_setup_runs_every_call(xdg, ws_factory, monkeypatch):
     """run_setup has no per-spec skip: invoked twice (as it would be on two
     successive fresh containers), it re-runs all commands both times."""

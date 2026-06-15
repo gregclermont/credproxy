@@ -875,7 +875,54 @@ def _enter_exec_cmd(cfg: dict, container: str, cmd: list[str], *,
         out += ["-u", user_override]
     out += ["--interactive=true", f"--tty={'true' if isatty else 'false'}", "--detach=false"]
     out.append(container)
-    out += cmd
+    out += _enter_command(cfg, cmd)
+    return out
+
+
+# Default `enter` env shim: source the proxy's bootstrap-written env file (CA
+# bundle vars) before exec'ing the command. Guarded by `[ -f ... ]` so a missing
+# file (bootstrap not run yet) is a no-op, not an error that would abort before
+# the exec.
+DEFAULT_ENTER_PRELUDE = (
+    "[ -f /etc/profile.d/credproxy.sh ] && . /etc/profile.d/credproxy.sh"
+)
+
+
+def _enter_command(cfg: dict, cmd: list[str]) -> list[str]:
+    """The command argv for `enter`, optionally wrapped in an env shim.
+
+    By default credproxy wraps the command in `sh -c '<prelude>; exec "$@"'`,
+    where the prelude sources the proxy's bootstrap-written env file
+    (/etc/profile.d/credproxy.sh -- the CA-bundle vars). This is the only way to
+    get that env into BOTH an interactive shell AND `enter -- cmd` AND their
+    subprocesses: docker exec is a direct execve (no shell init, no PAM), so the
+    env file otherwise loads only in a login shell. `exec "$@"` replaces the shim
+    in place, so there's no extra PID and signals/TTY/exit code/argv all pass
+    through; `$0` is a label shown in error messages.
+
+    Escape hatch: `enter_prelude` overrides the shell snippet; set it to "" to
+    skip wrapping entirely (direct execve, no /bin/sh dependency)."""
+    prelude = cfg.get("enter_prelude")
+    if prelude is None:
+        prelude = DEFAULT_ENTER_PRELUDE
+    if not prelude:
+        return list(cmd)
+    return ["sh", "-c", f'{prelude}; exec "$@"', "credproxy-enter", *cmd]
+
+
+def effective_config(cfg: dict) -> dict:
+    """A copy of the parsed config with the *enter-time* defaults resolved, for
+    display (`config`/`inspect`).
+
+    load_config already fills the create-time defaults (image, home, empty
+    mounts/env/setup, map_host_user). This additionally resolves the two fields
+    whose defaults are computed at enter time, so they don't show as null when
+    they actually have an effect: `workdir` -> `home`, and `enter_prelude` ->
+    the default shim snippet. The result reflects what `enter` actually does."""
+    out = dict(cfg)
+    out["workdir"] = cfg.get("workdir") or cfg.get("home")
+    ep = cfg.get("enter_prelude")
+    out["enter_prelude"] = DEFAULT_ENTER_PRELUDE if ep is None else ep
     return out
 
 

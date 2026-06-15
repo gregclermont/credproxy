@@ -385,7 +385,7 @@ def test_spec_hash_ignores_user_and_exec_flags(xdg):
 
     base = {"image": "x", "home": "/h", "mounts": [], "env": {}, "setup": []}
     withuser = {**base, "user": "dev", "exec_flags": ["--workdir", "/srv"],
-                "workdir": "/code"}
+                "workdir": "/code", "enter_prelude": "export X=1"}
     assert workspace_spec_hash(base, "p") == workspace_spec_hash(withuser, "p")
 
 
@@ -471,6 +471,66 @@ def test_load_config_workdir_not_absolute(xdg, workspaces_dir):
     _write(workspaces_dir, "b", 'image = "alpine:3"\nworkdir = "relative"\n')
     with pytest.raises(ConfigError, match="`workdir` must be an absolute path"):
         load_config(Workspace("b"))
+
+
+# ---- enter_prelude -----------------------------------------------------------
+
+
+def test_load_config_enter_prelude(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "p", 'image = "alpine:3"\nenter_prelude = "export X=1"\n')
+    assert load_config(Workspace("p"))["enter_prelude"] == "export X=1"
+
+
+def test_load_config_enter_prelude_default_and_empty(xdg, workspaces_dir):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "pd", 'image = "alpine:3"\n')
+    assert load_config(Workspace("pd"))["enter_prelude"] is None
+    # explicit "" is a valid value (disables the shim)
+    _write(workspaces_dir, "pe", 'image = "alpine:3"\nenter_prelude = ""\n')
+    assert load_config(Workspace("pe"))["enter_prelude"] == ""
+
+
+def test_load_config_enter_prelude_not_string(xdg, workspaces_dir):
+    from credproxy_cli.core.config import ConfigError, load_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "b", 'image = "alpine:3"\nenter_prelude = 42\n')
+    with pytest.raises(ConfigError, match="`enter_prelude` must be a string"):
+        load_config(Workspace("b"))
+
+
+# ---- declared_config (config --declared) -------------------------------------
+
+
+def test_declared_config_raw_keys_no_defaults(xdg, workspaces_dir):
+    """declared_config returns exactly what's in the file, before defaults, and
+    excludes the [[binding]] array."""
+    from credproxy_cli.core.config import declared_config
+    from credproxy_cli.core.workspace import Workspace
+
+    _write(workspaces_dir, "d", """
+        image = "alpine:3"
+        user = "dev"
+        [[binding]]
+        injector = "bearer"
+        provider = "env"
+        secret = "X"
+        hosts = ["h"]
+    """)
+    assert declared_config(Workspace("d")) == {"image": "alpine:3", "user": "dev"}
+
+
+def test_declared_config_missing_file(xdg, workspaces_dir):
+    from credproxy_cli.core.config import ConfigError, declared_config
+    from credproxy_cli.core.workspace import Workspace
+
+    with pytest.raises(ConfigError, match="not found"):
+        declared_config(Workspace("ghost"))
 
 
 # ---- run_flags ---------------------------------------------------------------

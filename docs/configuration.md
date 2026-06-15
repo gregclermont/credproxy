@@ -119,6 +119,7 @@ These shape how `enter` runs commands in the container; they are **exec-only**
 |---|---|---|---|
 | `user` | string | image default (root) | Runs `enter` (and `enter -- cmd`) as this user via `docker exec -u`. The user must exist in the image — built in, or created by `setup`, which always runs as **root** (so it can `useradd`, add sudoers, and `chown` the home volume to the user). `enter --user NAME` overrides it for one session (e.g. `enter --user root` for a debug shell). |
 | `workdir` | string | `home` | Directory `enter` starts in (`docker exec --workdir`) — the `workspaceFolder` analog. Defaults to `home`, so you land in your home dir rather than the image's `WORKDIR` (`/` on the devcontainers base); point it at a bind-mounted project to land there. Must be absolute. A `--workdir` in `exec_flags` still overrides it (docker last-wins). |
+| `enter_prelude` | string | source the CA-env file | A shell snippet run before the enter command, via `sh -c '<prelude>; exec "$@"'`. The default sources the proxy's bootstrap-written env file (`/etc/profile.d/credproxy.sh`) so the HTTPS-CA env vars reach an interactive shell, `enter -- cmd`, **and** subprocesses — `docker exec` is a bare `execve`, so without this the env only loads in a login shell. `exec "$@"` keeps it transparent (no extra PID; signals/TTY/exit code/argv pass through). Set to `""` to skip wrapping (direct `execve`, no `/bin/sh` dependency). |
 | `exec_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the `docker exec` for `enter` (e.g. `["--workdir", "/srv"]`, `["--env", "FOO=bar"]`). credproxy keeps ownership of the session-control flags (`-i`/`-t`/`-d`), so these can't detach the session or break auto-stop. |
 
 `setup` runs as root regardless of `user`, so it is the place to provision a
@@ -234,13 +235,15 @@ file. You can always skip the command and edit the TOML directly.
 | `credproxy workspace NAME binding test [BINDING_NAME]` | Dry-run: fetch each binding's secret through its provider and report success and **value length only** (never the value). Exit 1 if any fail. |
 | `credproxy workspace binding test --provider P --secret REF [--injector I]` | Ad-hoc variant: test a provider/injector combination **before** binding it. No workspace is required. |
 | `credproxy workspace NAME edit` | Open `<name>.toml` in `$VISUAL`/`$EDITOR` (default `vi`), then validate it: warns if the edit left it invalid (without reverting), otherwise hints `apply`/`start`. Pure sugar over opening the file yourself. |
+| `credproxy workspace NAME config [--declared]` | Read-only: dump the container-side config. Default `effective` — every field with its in-effect value, all defaults filled (including the enter-time `workdir`→home and `enter_prelude`→shim defaults `inspect` leaves null), so you can see what actually applies even when it's not in the file. `--declared` shows only what's literally in the TOML. `--json` on both. |
 | `credproxy workspace NAME inspect` | Read-only: print the parsed config, container state, resolved host port, binding summary, and **itemized drift** between the file and what is currently applied. |
 | `credproxy workspace NAME apply` | Reconcile a running workspace to the edited file (see below). |
 
-There is intentionally **no** `config show` command — the file is a first-class
-path and `inspect` is the read-and-diff view. `edit` is the one editor
-convenience: it just opens that same file in `$EDITOR` and validates the result,
-adding no state of its own.
+These read-only views are projections of the file, with no state of their own:
+`config` shows the config values (effective or declared), `inspect` adds
+container state and **drift**, and `edit` just opens the same `<name>.toml` in
+`$EDITOR` and validates the result. The TOML file remains the single source of
+truth.
 
 ### Applying changes
 

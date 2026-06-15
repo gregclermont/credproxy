@@ -159,6 +159,37 @@ def test_create_workspace_success(xdg, workspaces_dir):
     assert (workspaces_dir / "myproj.toml").exists()
 
 
+def test_config_effective_fills_enter_time_defaults(xdg, workspaces_dir):
+    """`config` (effective) shows workdir/enter_prelude with their in-effect
+    values even when absent from the file."""
+    import json
+    (workspaces_dir / "w.toml").write_text('image = "alpine:3"\nhome = "/home/dev"\n')
+    ec, out, err = _run(["--json", "workspace", "w", "config"])
+    assert ec == 0, f"stderr: {err}"
+    cfg = json.loads(out)["config"]
+    assert json.loads(out)["mode"] == "effective"
+    assert cfg["workdir"] == "/home/dev"           # resolved from home
+    assert cfg["enter_prelude"] is not None        # resolved to the shim default
+
+
+def test_config_declared_shows_only_file_keys(xdg, workspaces_dir):
+    """`config --declared` shows only what's literally in the TOML."""
+    import json
+    (workspaces_dir / "w.toml").write_text('image = "alpine:3"\nhome = "/home/dev"\n')
+    ec, out, err = _run(["--json", "workspace", "w", "config", "--declared"])
+    assert ec == 0, f"stderr: {err}"
+    data = json.loads(out)
+    assert data["mode"] == "declared"
+    assert data["config"] == {"image": "alpine:3", "home": "/home/dev"}
+
+
+def test_config_reserved_name(xdg):
+    """`config` is a reserved verb -> can't be a workspace name."""
+    ec, _, err = _run(["workspace", "create", "config"])
+    assert ec != 0
+    assert "reserved" in err
+
+
 def test_list_marks_default(xdg, workspaces_dir, monkeypatch):
     """list output marks the default workspace with *."""
     for name in ("alpha", "bravo"):

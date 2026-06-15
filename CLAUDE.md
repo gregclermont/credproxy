@@ -117,6 +117,7 @@ Two entry points:
 - `credproxy workspace NAME delete` — remove both containers, home volume, config file, and state dir. In loose mode, prompts when targeting the default workspace.
 - `credproxy workspace NAME apply` — best-effort reconcile: bindings drift → live re-push to the running proxy; container-spec drift (image/home/mounts/env/setup) → deferred with a restart hint. Reports what was applied vs. deferred.
 - `credproxy workspace NAME inspect` — config + running state + host port + binding summary + itemized drift against applied-spec/applied-bindings.
+- `credproxy workspace NAME config [--declared]` — dump the container-side config. Default `effective` (every field with its in-effect value, all defaults filled — including the enter-time `workdir`→home and `enter_prelude`→shim defaults that `inspect` leaves null); `--declared` shows only what's literally in the TOML. `--json` on both.
 - `credproxy workspace NAME edit` — open `<name>.toml` in `$VISUAL`/`$EDITOR` (default `vi`), then validate it; warns if the edit left it invalid, else hints `apply`/`start`. Sugar over editing the file directly; interactive, so no `--json`.
 - `credproxy workspace NAME logs` — `docker logs -f` the proxy container.
 
@@ -138,7 +139,7 @@ Two entry points:
 
 **Loose aliases** (loose surface / `credp` only):
 
-`credp enter [NAME]`, `credp start [NAME]`, `credp stop [NAME]`, `credp delete [NAME]`, `credp apply [NAME]`, `credp inspect [NAME]`, `credp logs [NAME]`, `credp use NAME`, `credp create NAME [--image IMG]`, `credp list [FILTER]`, `credp binding {add|remove|list|test} ...` — all resolve to the canonical workspace command with the current default as the implicit workspace. An explicit NAME overrides the default.
+`credp enter [NAME]`, `credp start [NAME]`, `credp stop [NAME]`, `credp delete [NAME]`, `credp apply [NAME]`, `credp inspect [NAME]`, `credp config [NAME] [--declared]`, `credp logs [NAME]`, `credp use NAME`, `credp create NAME [--image IMG]`, `credp list [FILTER]`, `credp binding {add|remove|list|test} ...` — all resolve to the canonical workspace command with the current default as the implicit workspace. An explicit NAME overrides the default.
 
 **Harness commands** — `credproxy dev ...`, for hacking on credproxy itself; need the repo checkout:
 

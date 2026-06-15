@@ -51,7 +51,8 @@ from .render import fail, say
 
 # Workspace-scoped verbs (the `workspace NAME <verb>` tail).
 _WS_VERBS = {
-    "enter", "edit", "start", "stop", "delete", "apply", "inspect", "logs", "binding",
+    "enter", "edit", "start", "stop", "delete", "apply", "inspect", "config",
+    "logs", "binding",
 }
 # Workspace-level verbs that take a name as their argument, not a subject.
 _WS_NOUN_VERBS = {"create", "use", "list"}
@@ -233,6 +234,25 @@ def do_apply(ctx: Ctx, name: str | None) -> None:
     _require_exists(ws)
     result = lifecycle.apply_config(ws, notify=say)
     render.OUT.applied(ws.name, result)
+
+
+def do_config(ctx: Ctx, name: str | None, declared: bool) -> None:
+    """Dump a workspace's container-side config. Default mode is `effective` --
+    every field with its in-effect value, all defaults filled (the workspaceFolder
+    `workdir`, the enter shim, etc.) -- so you can see what actually applies
+    without it being in the file. `--declared` shows only what's literally in the
+    TOML, before defaults."""
+    from ..core import config as core_config
+    ws = _resolve_ws(ctx, name)
+    if declared:
+        cfg = core_config.declared_config(ws)
+    else:
+        cfg = lifecycle.effective_config(core_config.load_config(ws))
+    render.OUT.config({
+        "mode": "declared" if declared else "effective",
+        "config_path": str(ws.config_path),
+        "config": cfg,
+    })
 
 
 def do_inspect(ctx: Ctx, name: str | None) -> None:
@@ -774,6 +794,8 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     sub.add_parser("delete")
     sub.add_parser("apply")
     sub.add_parser("inspect")
+    p_config = sub.add_parser("config")
+    p_config.add_argument("--declared", action="store_true", dest="config_declared")
     sub.add_parser("logs")
 
     binding = sub.add_parser("binding")
@@ -970,6 +992,12 @@ _VERB_HELP = {
         "credproxy workspace NAME inspect -- show config, running state, host port,\n"
         "binding summary, and any drift against what was last applied."
     ),
+    "config": (
+        "credproxy workspace NAME config [--declared] -- dump the container-side\n"
+        "config. Default `effective`: every field with its in-effect value, all\n"
+        "defaults filled (so you see what applies even when it's not in the file).\n"
+        "`--declared` shows only what's literally in the .toml. `--json` for both."
+    ),
     "edit": (
         "credproxy workspace NAME edit -- open the config in $VISUAL/$EDITOR\n"
         "(default vi), then validate it. Sugar over editing the .toml directly;\n"
@@ -1090,6 +1118,8 @@ def _run_ws_verb(
         do_apply(ctx, name)
     elif verb == "inspect":
         do_inspect(ctx, name)
+    elif verb == "config":
+        do_config(ctx, name, a.config_declared)
     elif verb == "logs":
         do_logs(ctx, name)
     elif verb == "binding":
@@ -1117,7 +1147,8 @@ def _parse_create(argv: list[str]) -> argparse.Namespace:
 # independent behavior. They simply translate to the workspace dispatcher.
 
 _ALIAS_TO_WS_VERB = {
-    "enter", "edit", "start", "stop", "delete", "apply", "inspect", "logs", "binding",
+    "enter", "edit", "start", "stop", "delete", "apply", "inspect", "config",
+    "logs", "binding",
 }
 
 

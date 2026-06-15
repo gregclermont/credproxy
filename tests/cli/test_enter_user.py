@@ -16,15 +16,45 @@ def _cmd(cfg, *, user_override=None, isatty=True, cmd=None):
 
 def test_plain_no_user_no_flags():
     out = _cmd({})
-    assert out == ["docker", "exec", "--interactive=true", "--tty=true",
-                   "--detach=false", "ctr", "bash"]
+    # session-control prefix + container, then the env-shim-wrapped command.
+    assert out[:6] == ["docker", "exec", "--interactive=true", "--tty=true",
+                       "--detach=false", "ctr"]
+    assert out[6:8] == ["sh", "-c"]
+    assert out[-2:] == ["credproxy-enter", "bash"]
 
 
 def test_config_user():
     out = _cmd({"user": "dev"})
     # -u dev comes before the session-control flags and the container.
     assert out[:4] == ["docker", "exec", "-u", "dev"]
-    assert out[-2:] == ["ctr", "bash"]
+    assert out[-1] == "bash"        # the (shim-wrapped) command
+    assert "ctr" in out
+
+
+# ---- enter env shim ----------------------------------------------------------
+
+
+def test_enter_wraps_command_in_env_shim_by_default():
+    out = _cmd({}, cmd=["npm", "test"])
+    i = out.index("ctr")
+    assert out[i + 1:i + 3] == ["sh", "-c"]
+    script = out[i + 3]
+    assert script.endswith('exec "$@"')
+    assert "credproxy.sh" in script              # default sources the CA-env file
+    assert out[i + 4] == "credproxy-enter"       # $0 label
+    assert out[i + 5:] == ["npm", "test"]        # command preserved as "$@"
+
+
+def test_enter_prelude_override():
+    out = _cmd({"enter_prelude": "export X=1"}, cmd=["bash"])
+    assert out[out.index("-c") + 1] == 'export X=1; exec "$@"'
+
+
+def test_enter_prelude_empty_disables_shim():
+    out = _cmd({"enter_prelude": ""}, cmd=["npm", "test"])
+    # no wrapper -- command execs directly after the container
+    assert "sh" not in out[out.index("ctr"):]
+    assert out[-3:] == ["ctr", "npm", "test"]
 
 
 def test_exec_flags_spliced_before_session_control():
