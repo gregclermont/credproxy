@@ -1,9 +1,11 @@
 """Proxy mitmproxy addon: terminate configured hosts, run injection schemes.
 
-For SNIs in `state.creds.intercept_hosts()`, mitmproxy terminates TLS using
-its CA; the `request` hook runs each binding's scheme (`on_request`) to inject
-the credential before forwarding. For everything else, `ignore_connection =
-True` puts the flow into byte-passthrough so we only see the SNI.
+For SNIs that `state.creds.intercepts(sni)` accepts (an exact binding host, a
+glob pattern like `*.amazonaws.com`, or a live re-seal host), mitmproxy
+terminates TLS using its CA; the `request` hook runs each binding's scheme
+(`on_request`) to inject the credential before forwarding. For everything else,
+`ignore_connection = True` puts the flow into byte-passthrough so we only see
+the SNI.
 
 The `response` hook runs each transform's `on_response` (a no-op for the
 substitute family today; the seam the re-seal schemes will use to mint and
@@ -34,7 +36,7 @@ class HostnameLogger:
     def tls_clienthello(self, data: tls.ClientHelloData) -> None:
         creds = self._state.creds
         sni = data.client_hello.sni
-        if sni in creds.intercept_hosts():
+        if creds.intercepts(sni):
             print(f"[sni] {sni} (intercept)", flush=True)
             return
         print(f"[sni] {sni or '<no-sni>'} (passthrough)", flush=True)
@@ -64,7 +66,7 @@ class HostnameLogger:
 
         if applied:
             marker = f" (inject:{','.join(applied)})"
-        elif host in creds.intercept_hosts():
+        elif creds.intercepts(host):
             marker = " (no-inject)"
         else:
             marker = ""

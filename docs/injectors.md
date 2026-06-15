@@ -166,8 +166,14 @@ A `sigv4` binding uses a multi-slot secret, e.g.:
 credproxy workspace NAME binding add --injector sigv4 --provider env \
     --secret access_key_id=AWS_ACCESS_KEY_ID \
     --secret secret_access_key=AWS_SECRET_ACCESS_KEY \
-    --host sts.amazonaws.com
+    --host '*.amazonaws.com'
 ```
+
+`sigv4` reads the region and service from each request, so a single
+`*.amazonaws.com` glob host covers every regional endpoint (`s3.us-east-1…`,
+`dynamodb.eu-west-1…`) with one key — scope it tighter with `s3.*.amazonaws.com`
+or a literal `sts.amazonaws.com` if you prefer. See [host
+patterns](configuration.md#host-patterns) for the glob rules.
 
 In the workspace, configure any throwaway AWS credentials (e.g. dummy
 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`) so the SDK produces a signed

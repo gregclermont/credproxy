@@ -340,3 +340,93 @@ def test_inward_bindings_excludes_secret():
     # No secret/real anywhere on the inward descriptor.
     assert not hasattr(ib, "real")
     assert not hasattr(ib, "secret")
+
+
+# ---- glob host patterns ----
+
+def _sigv4(**over):
+    e = {
+        "name": "aws", "hosts": ["*.amazonaws.com"], "scheme": "sigv4",
+        "secret": {"access_key_id": "AKID", "secret_access_key": "SAK"},
+    }
+    e.update(over)
+    return e
+
+
+def test_pattern_transforms_match_across_regions():
+    """A single `*.amazonaws.com` sigv4 binding covers every regional host."""
+    creds = config.load_resolved({"bindings": [_sigv4()]})
+    for host in ("s3.us-east-1.amazonaws.com", "dynamodb.eu-west-1.amazonaws.com"):
+        [t] = creds.transforms_for(host)
+        assert t.scheme.name == "sigv4"
+
+
+def test_pattern_does_not_match_other_domains():
+    creds = config.load_resolved({"bindings": [_sigv4()]})
+    assert creds.transforms_for("api.github.com") == []
+    assert creds.transforms_for("amazonaws.com.evil.test") == []
+
+
+def test_intercepts_predicate_literal_and_pattern():
+    creds = config.load_resolved({"bindings": [
+        _entry(name="gh", hosts=["api.github.com"]),
+        _sigv4(),
+    ]})
+    assert creds.intercepts("api.github.com") is True          # literal
+    assert creds.intercepts("s3.us-east-1.amazonaws.com") is True  # pattern
+    assert creds.intercepts("example.com") is False
+    assert creds.intercepts(None) is False
+    assert creds.intercepts("") is False
+
+
+def test_intercept_hosts_enumerates_pattern_strings():
+    """intercept_hosts() can't enumerate matched SNIs, so it surfaces the
+    pattern string itself (for /setup disclosure + logging)."""
+    creds = config.load_resolved({"bindings": [
+        _entry(name="gh", hosts=["api.github.com"]),
+        _sigv4(),
+    ]})
+    assert creds.intercept_hosts() == {"api.github.com", "*.amazonaws.com"}
+
+
+def test_scoped_pattern_only_matches_its_service():
+    creds = config.load_resolved({"bindings": [_sigv4(hosts=["s3.*.amazonaws.com"])]})
+    assert len(creds.transforms_for("s3.us-east-1.amazonaws.com")) == 1
+    assert creds.transforms_for("dynamodb.us-east-1.amazonaws.com") == []
+
+
+def test_literal_and_pattern_both_apply_literal_first():
+    """A host matched by both a literal binding and a pattern binding gets both
+    transforms, literals (most specific) before patterns."""
+    creds = config.load_resolved({"bindings": [
+        _entry(name="exact", hosts=["s3.us-east-1.amazonaws.com"],
+               params={"header": "X-Extra"}, placeholder="ph"),
+        _sigv4(),
+    ]})
+    ts = creds.transforms_for("s3.us-east-1.amazonaws.com")
+    assert [t.name for t in ts] == ["exact", "aws"]
+
+
+def test_reject_overbroad_pattern():
+    with pytest.raises(config.ConfigError, match="too broad"):
+        config.load_resolved({"bindings": [_sigv4(hosts=["*.com"])]})
+
+
+def test_reject_wildcard_in_registrable_domain():
+    with pytest.raises(config.ConfigError, match="registrable domain"):
+        config.load_resolved({"bindings": [_sigv4(hosts=["a.*.com"])]})
+
+
+def test_reject_bare_star_pattern():
+    with pytest.raises(config.ConfigError, match="too broad"):
+        config.load_resolved({"bindings": [_sigv4(hosts=["*"])]})
+
+
+def test_duplicate_identical_pattern_same_location_rejected():
+    """Two bindings sharing an identical pattern + wire location still collide
+    (the uniqueness check keys on the host string, pattern or literal)."""
+    with pytest.raises(config.ConfigError, match="both write"):
+        config.load_resolved({"bindings": [
+            _entry(name="a", hosts=["*.example.com"], placeholder="p1"),
+            _entry(name="b", hosts=["*.example.com"], placeholder="p1"),
+        ]})

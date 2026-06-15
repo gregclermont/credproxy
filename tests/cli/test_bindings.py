@@ -154,6 +154,38 @@ def test_parse_empty_name_rejected(xdg):
         _parse_bindings(raw, "test")
 
 
+def test_validate_accepts_glob_pattern(xdg, workspaces_dir):
+    """A well-formed glob host (e.g. `*.amazonaws.com`) validates."""
+    from credproxy_cli.core.bindings import Binding, validate
+
+    b = Binding(name="aws", injector="sigv4", provider="env",
+                secret={"access_key_id": "A", "secret_access_key": "B"},
+                hosts=("*.amazonaws.com",), placeholder=None, env=None)
+    validate([b], "test")  # does not raise
+
+
+def test_validate_rejects_overbroad_pattern(xdg, workspaces_dir):
+    from credproxy_cli.core.bindings import Binding, validate
+    from credproxy_cli.core.errors import ConfigError
+
+    b = Binding(name="aws", injector="sigv4", provider="env",
+                secret={"access_key_id": "A", "secret_access_key": "B"},
+                hosts=("*.com",), placeholder=None, env=None)
+    with pytest.raises(ConfigError, match="too broad"):
+        validate([b], "test")
+
+
+def test_validate_rejects_bare_star(xdg, workspaces_dir):
+    from credproxy_cli.core.bindings import Binding, validate
+    from credproxy_cli.core.errors import ConfigError
+
+    b = Binding(name="aws", injector="sigv4", provider="env",
+                secret={"access_key_id": "A", "secret_access_key": "B"},
+                hosts=("*",), placeholder=None, env=None)
+    with pytest.raises(ConfigError, match="too broad"):
+        validate([b], "test")
+
+
 def test_validate_duplicate_name(xdg, workspaces_dir):
     from credproxy_cli.core.bindings import Binding, validate
     from credproxy_cli.core.errors import ConfigError

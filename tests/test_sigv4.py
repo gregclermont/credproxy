@@ -72,6 +72,7 @@ def test_uri_encode_double_encodes_for_non_s3():
 def _state(hosts):
     class Creds:
         def __init__(self, h): self._h = h
+        def intercepts(self, sni): return bool(sni) and sni in self._h
         def intercept_hosts(self): return set(self._h)
         def transforms_for(self, host): return list(self._h.get(host, []))
         def inward_bindings(self): return []

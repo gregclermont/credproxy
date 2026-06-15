@@ -26,6 +26,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
+from . import hostmatch
 from .errors import ConfigError, CredproxyError
 from .injectors import Injector, find_injector
 from .providers import fetch_many as provider_fetch_many
@@ -210,6 +211,15 @@ def validate(bindings: list[Binding], source: str) -> None:
         if b.name in names:
             raise ConfigError(f"{source}: duplicate binding name '{b.name}'")
         names.add(b.name)
+
+        # A `*`-bearing host is a glob pattern; validate it strictly (mirrors
+        # proxy/hostmatch.py) so a too-broad pattern is caught at `binding add`,
+        # not only when the proxy validates the pushed config.
+        for host in b.hosts:
+            if hostmatch.is_pattern(host):
+                err = hostmatch.validate_pattern(host)
+                if err:
+                    raise ConfigError(f"{source}: binding '{b.name}': {err}")
 
         # injector + provider must exist (raises InjectorError/ProviderError).
         injector = find_injector(b.injector)

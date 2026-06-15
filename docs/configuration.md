@@ -233,7 +233,7 @@ it for the real value on requests to the scoped hosts.
 | `injector` | yes | Name of an injector definition (`$XDG_CONFIG_HOME/credproxy/injectors/<name>.toml`, falling back to bundled). Selects the scheme, its params, and the placeholder shape. Bundled: `bearer`, `basic`, `body`. |
 | `provider` | yes | Name of a provider executable (`$XDG_CONFIG_HOME/credproxy/providers/<name>`, falling back to bundled). Bundled: `env`. |
 | `secret` | yes | Either a bare ref string (single-slot), or an inline table mapping the scheme's slot names to refs (multi-slot). A ref is opaque to credproxy and meaningful only to the provider — an env-var name, a vault path, an item id. |
-| `hosts` | yes | Non-empty list of hostnames the credential may be injected on. This is the security scope: a request to any other host never sees the real value. |
+| `hosts` | yes | Non-empty list of hostnames the credential may be injected on. This is the security scope: a request to any other host never sees the real value. Each entry is a literal hostname (exact match) **or** a glob pattern containing `*` — see *Host patterns* below. |
 | `name` | no | Handle used to address the binding (`binding remove`, `binding test NAME`). Auto-generated as `<injector>-<provider>`, with a `-2`, `-3`, … suffix on collision. |
 | `placeholder` | no | The inert sentinel the workspace sends (substitute schemes). Auto-generated once from the injector's placeholder pattern (format-valid for the service), then written back to the file so it never drifts. Override only if you need a specific value. |
 | `env` | no | Suggested env var name surfaced to the workspace via `/setup`. Defaults to the injector's `env` hint. |
@@ -244,12 +244,34 @@ surgical edit that preserves your comments and ordering. After that the values
 are static — the file stays the single source of truth, with nothing held only
 in memory.
 
+**Host patterns.** A `hosts` entry without `*` is matched exactly (the common
+case, and the fast path). An entry containing `*` is a **glob**, where `*` spans
+any characters including dots — so one binding can cover a family of endpoints:
+
+```toml
+hosts = ["*.amazonaws.com"]        # any AWS service, any region
+hosts = ["s3.*.amazonaws.com"]     # S3 only, any region
+hosts = ["github.com", "api.github.com"]   # literals (exact), unchanged
+```
+
+This is what `sigv4` wants: it reads region and service from each request, so a
+single `*.amazonaws.com` binding re-signs every regional endpoint with one real
+key. Patterns are validated strictly, because this scope decides where a real
+credential is injected: the two rightmost labels must be literal, so
+`*.example.com` and `s3.*.amazonaws.com` are allowed but `*`, `*.com`, and
+`*.*` are rejected (an over-broad pattern can't inject a credential into an
+attacker-chosen host). A literal host always takes priority over a pattern that
+also matches it; if two *different* patterns overlap, both apply in file order
+(the later one wins a shared header).
+
 **Validation.** Binding names must be unique within the workspace, and no two
 bindings may write the same wire location on the same host (e.g. both into the
-`Authorization` header on `api.github.com`). The binding's secret slots must
-match the scheme's declared slots. The referenced injector and provider must
-resolve. Violations are reported as a config error naming the file and the
-offending field.
+`Authorization` header on `api.github.com`). For glob hosts this collision check
+is by pattern string — two identical patterns collide, but two *different*
+overlapping patterns are resolved at request time (file order) rather than
+rejected. The binding's secret slots must match the scheme's declared slots. The
+referenced injector and provider must resolve. Violations are reported as a
+config error naming the file and the offending field.
 
 **Presets.** Some credentials need several coordinated bindings — a GitHub PAT
 is `bearer` on `api.github.com` but HTTP `basic` on `github.com`/`ghcr.io`.

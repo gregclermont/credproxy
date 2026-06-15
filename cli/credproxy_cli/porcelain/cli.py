@@ -757,7 +757,11 @@ def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
     # Repeatable: a single bare REF is single-slot; one or more `slot=ref`
     # values form a multi-slot secret table.
     p.add_argument("--secret", action="append", metavar="REF|SLOT=REF")
-    p.add_argument("--host", action="append", metavar="HOST")
+    # Repeatable. A literal hostname is matched exactly; a value containing `*`
+    # is a glob (`*` spans dots), so `*.amazonaws.com` scopes one binding to
+    # every AWS region/service endpoint. The two rightmost labels must be
+    # literal (`*.example.com` ok; `*.com`/`*` rejected).
+    p.add_argument("--host", action="append", metavar="HOST|GLOB")
     p.add_argument("--name", dest="binding_name", default=None)
     p.add_argument("--placeholder", default=None)
     p.add_argument("--env", default=None)

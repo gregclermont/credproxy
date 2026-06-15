@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from mitmproxy.test import tflow, tutils
 
 import addon
+import config
 import schemes
 from config import Transform
 
@@ -22,6 +23,9 @@ class FakeCreds:
 
     def __init__(self, hosts: dict[str, list[Transform]]):
         self._hosts = hosts
+
+    def intercepts(self, sni) -> bool:
+        return bool(sni) and sni in self._hosts
 
     def intercept_hosts(self) -> set[str]:
         return set(self._hosts)
@@ -136,6 +140,41 @@ def test_request_non_intercepted_host_no_change():
     flow = make_flow(host="example.com", headers={"Authorization": "Bearer PH"})
     log.request(flow)
     assert flow.request.headers["Authorization"] == "Bearer PH"
+
+
+# ---- glob host patterns through the addon (real BindingCredentials) ----
+
+def _pattern_state(pattern):
+    """A real config.BindingCredentials with one bearer binding scoped to a
+    glob pattern -- exercises the addon's intercepts()/transforms_for() path."""
+    creds = config.load_resolved({"bindings": [{
+        "name": "b", "hosts": [pattern], "scheme": "bearer",
+        "params": {"header": "Authorization"}, "secret": {"value": "REAL"},
+        "placeholder": "PH",
+    }]})
+    return SimpleNamespace(creds=creds)
+
+
+def test_clienthello_pattern_sni_intercepted():
+    log = addon.HostnameLogger(_pattern_state("*.amazonaws.com"))
+    data = make_clienthello("s3.us-east-1.amazonaws.com")
+    log.tls_clienthello(data)
+    assert data.ignore_connection is False
+
+
+def test_clienthello_pattern_non_match_passthrough():
+    log = addon.HostnameLogger(_pattern_state("*.amazonaws.com"))
+    data = make_clienthello("api.github.com")
+    log.tls_clienthello(data)
+    assert data.ignore_connection is True
+
+
+def test_request_substitutes_on_pattern_matched_host():
+    log = addon.HostnameLogger(_pattern_state("*.amazonaws.com"))
+    flow = make_flow(host="s3.eu-west-1.amazonaws.com",
+                     headers={"Authorization": "Bearer PH"})
+    log.request(flow)
+    assert flow.request.headers["Authorization"] == "Bearer REAL"
 
 
 def test_state_creds_swap_takes_effect_on_next_call():

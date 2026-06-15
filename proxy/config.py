@@ -32,8 +32,18 @@ Uniqueness constraints:
   - the (host, wire-location) pair is unique — two bindings can't both write
     the same header (or both write the body) on the same host.
 
+A `hosts` entry is either a literal hostname (exact match) or a glob pattern
+containing `*` (see hostmatch.py): `*.amazonaws.com` scopes a binding to every
+AWS region/service endpoint. Literals keep the O(1) dict path; patterns are
+scanned linearly.
+
 Credentials API:
-  - `intercept_hosts()`  -> set[str]: union of all bindings' hosts.
+  - `intercepts(sni)`    -> bool: should this SNI be TLS-terminated? Checks
+    literals, then glob patterns, then the live runtime layer. The decision
+    seam (vs. `intercept_hosts`, which only enumerates for display).
+  - `intercept_hosts()`  -> set[str]: literals + pattern strings + live runtime
+    hosts, for /setup disclosure and logging (NOT the decision -- a pattern
+    can't enumerate the SNIs it matches).
   - `transforms_for(host)` -> list[Transform]: transforms active for a host,
     static (pushed) layer plus a runtime-augmentable layer (the re-seal seam;
     empty today).
@@ -45,6 +55,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import hostmatch
 import schemes
 from schemes import Scheme
 
@@ -75,6 +86,7 @@ class InwardBinding:
 
 
 class Credentials(Protocol):
+    def intercepts(self, sni: str | None) -> bool: ...
     def intercept_hosts(self) -> set[str]: ...
     def transforms_for(self, host: str) -> list[Transform]: ...
     def inward_bindings(self) -> list[InwardBinding]: ...
@@ -94,9 +106,15 @@ class BindingCredentials:
         self,
         hosts: dict[str, list[Transform]],
         bindings: list[InwardBinding] | None = None,
+        patterns: list[tuple[str, "re.Pattern", Transform]] | None = None,
         clock=time.monotonic,
     ):
         self._hosts = hosts
+        # Glob-pattern layer (hostmatch): (pattern_str, compiled_regex,
+        # Transform), in config order. Scanned linearly after the literal dict
+        # hit, so a request matching several patterns applies them in config
+        # order (last writer to a given header wins). Usually empty.
+        self._patterns = patterns or []
         # Runtime layer: host -> list of (Transform, expires_at | None). Re-seal
         # schemes mint these at response time with a TTL; expired entries are
         # pruned lazily on read (no background task). expires_at is in `clock`
@@ -105,12 +123,28 @@ class BindingCredentials:
         self._clock = clock
         self._bindings: list[InwardBinding] = bindings or []
 
+    def intercepts(self, sni: str | None) -> bool:
+        """Should this SNI be TLS-terminated? The decision seam used by the
+        addon: exact literal, then glob pattern, then a live runtime host. A
+        pattern set can't be enumerated, so this is a predicate, not membership
+        on `intercept_hosts()`."""
+        if not sni:
+            return False
+        if sni in self._hosts:
+            return True
+        if any(rx.fullmatch(sni) for (_, rx, _) in self._patterns):
+            return True
+        return bool(self._live(sni))
+
     def intercept_hosts(self) -> set[str]:
         live = {h for h in list(self._runtime) if self._live(h)}
-        return set(self._hosts) | live
+        return set(self._hosts) | {p for (p, _, _) in self._patterns} | live
 
     def transforms_for(self, host: str) -> list[Transform]:
-        return list(self._hosts.get(host, [])) + self._live(host)
+        out = list(self._hosts.get(host, []))
+        if self._patterns:
+            out += [t for (_, rx, t) in self._patterns if rx.fullmatch(host)]
+        return out + self._live(host)
 
     def register_runtime(self, host: str, transform: Transform,
                          ttl: float | None = None) -> None:
@@ -259,6 +293,13 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
     # unconditionally and can't share a location with anything.
     loc_seen: dict[tuple, dict] = {}
     hosts: dict[str, list[Transform]] = {}
+    # Glob-pattern bindings: (pattern_str, compiled_regex, Transform), config
+    # order. The (host, location) uniqueness check above keys on the host
+    # *string*, so it catches two bindings sharing an identical pattern but not
+    # two *different* patterns that happen to overlap (e.g. `*.amazonaws.com` vs
+    # `s3.*.amazonaws.com`); that's resolved at request time by transforms_for's
+    # config-order, last-writer-wins.
+    patterns: list[tuple[str, re.Pattern, Transform]] = []
     inward: list[InwardBinding] = []
 
     for i, entry in enumerate(bindings_raw):
@@ -274,11 +315,18 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
             _fail(f"{source}: duplicate binding name '{name}'")
         names_seen.add(name)
 
-        # --- hosts ---
+        # --- hosts (literals + glob patterns) ---
         binding_hosts = entry.get("hosts")
         if not isinstance(binding_hosts, list) or not binding_hosts \
                 or not all(isinstance(h, str) and h for h in binding_hosts):
             _fail(f"{source}: {where}.hosts must be a non-empty array of strings")
+        # A host with `*` is a glob pattern; validate it strictly here (the
+        # CLI mirrors this at `binding add`, but the proxy is the boundary).
+        for h in binding_hosts:
+            if hostmatch.is_pattern(h):
+                err = hostmatch.validate_pattern(h)
+                if err:
+                    _fail(f"{source}: {where}.hosts: {err}")
 
         # --- scheme ---
         # Built-in schemes come from the registry; "script" builds a sandboxed
@@ -380,7 +428,10 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
             secrets=dict(secret),
         )
         for host in binding_hosts:
-            hosts.setdefault(host, []).append(transform)
+            if hostmatch.is_pattern(host):
+                patterns.append((host, hostmatch.compile_pattern(host), transform))
+            else:
+                hosts.setdefault(host, []).append(transform)
 
         # Re-seal: a scheme may need extra hosts TLS-terminated (the API hosts
         # where a minted token is later used) even though no static transform
@@ -402,4 +453,4 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
             hosts=list(binding_hosts),
         ))
 
-    return BindingCredentials(hosts, inward)
+    return BindingCredentials(hosts, inward, patterns)
