@@ -88,7 +88,6 @@ $XDG_STATE_HOME/credproxy/                        # default ~/.local/state/credp
   default-workspace                               # current-default pointer (loose surface)
   workspaces/<name>/
     auth.token                                    # bearer token (mode 0644)
-    setup_done                                    # spec hash of last successful setup
     applied-spec.json                             # last applied container spec (for drift)
     applied-bindings.json                         # last pushed bindings metadata (no secrets)
     sessions/<pid>                                # pidfiles for auto-stop tracking

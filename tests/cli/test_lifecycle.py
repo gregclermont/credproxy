@@ -437,3 +437,47 @@ def test_clean_stale_ignores_invalid_filename(xdg, workspaces_dir):
 
     _clean_stale_sessions(ws)
     assert not (ws.sessions_dir / "notanumber").exists()
+
+
+# ---- run_setup: runs on every (new) container, no per-spec skip --------------
+
+
+def _fake_run(calls, code=0):
+    class _R:
+        returncode = code
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return _R()
+    return run
+
+
+def test_run_setup_runs_every_call(xdg, ws_factory, monkeypatch):
+    """run_setup has no per-spec skip: invoked twice (as it would be on two
+    successive fresh containers), it re-runs all commands both times."""
+    from credproxy_cli.core import lifecycle
+    calls = []
+    monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run(calls))
+    ws = ws_factory("a")
+    cfg = {"setup": ["echo one", "echo two"]}
+    lifecycle.run_setup(ws, cfg, notify=lambda *_: None)
+    lifecycle.run_setup(ws, cfg, notify=lambda *_: None)
+    assert len(calls) == 4  # 2 commands x 2 invocations
+    assert calls[0][:3] == ["docker", "exec", ws.ws_container]
+    assert "echo one" in calls[0]
+
+
+def test_run_setup_noop_without_commands(xdg, ws_factory, monkeypatch):
+    from credproxy_cli.core import lifecycle
+    calls = []
+    monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run(calls))
+    lifecycle.run_setup(ws_factory("a"), {}, notify=lambda *_: None)
+    assert calls == []
+
+
+def test_run_setup_failure_raises(xdg, ws_factory, monkeypatch):
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.errors import DockerError
+    monkeypatch.setattr(lifecycle.subprocess, "run", _fake_run([], code=7))
+    with pytest.raises(DockerError):
+        lifecycle.run_setup(ws_factory("a"), {"setup": ["false"]},
+                            notify=lambda *_: None)

@@ -5,11 +5,11 @@ surfaced via an optional `notify: Callable[[str], None]`. Porcelain wires
 it to stderr rendering (the `[credproxy] ` prefix); when omitted, progress
 is silently dropped. The core never imports porcelain and never prints.
 
-Setup commands (config key `setup`) run once after the workspace container
-is (re)created. They do NOT re-run on a plain `start` of an existing
-container. The spec hash that last successfully ran setup is recorded in
-<state_dir>/setup_done; if the running container's spec hash matches that
-file the setup phase is skipped.
+Setup commands (config key `setup`) run on every freshly created workspace
+container -- first create, a spec-drift recreate, or a manual `docker rm` +
+`start`. They do NOT re-run on a plain `start`/`stop` of an existing container
+(its writable layer is intact). Because a recreate re-runs them, setup commands
+should be idempotent.
 
 Applied-state records (written by this module, no side effects on read):
   <state_dir>/applied-spec.json   — the spec dict that fed the last
@@ -206,24 +206,20 @@ def create_ws_container(
     _write_applied_spec(ws, cfg, proxy_id)
 
 
-def run_setup(ws: Workspace, cfg: dict, spec_hash: str, notify: Notify) -> None:
-    """Run setup commands in the workspace container (once per spec hash).
+def run_setup(ws: Workspace, cfg: dict, notify: Notify) -> None:
+    """Run the `setup` commands in the workspace container, as root (the image's
+    default user) via `docker exec`. Called only on a freshly created container
+    (see start_workspace) -- so it runs once per container instance, which is
+    what a fresh, empty writable layer needs. A failing command raises
+    DockerError and leaves the container running for debugging.
 
-    Checks <state_dir>/setup_done. If it contains the current spec_hash,
-    setup is skipped. After all commands succeed, writes spec_hash to
-    setup_done. A failing command raises DockerError and leaves the file
-    unchanged (so the next `start` re-attempts setup)."""
+    Setup commands should be idempotent: a container recreate (spec drift or a
+    manual `docker rm`) re-runs them, while the persistent home volume
+    survives -- so writable-layer work (apt, useradd) is re-provisioned and
+    home-volume work just needs to be cheap to repeat."""
     setup = cfg.get("setup") or []
     if not setup:
         return
-
-    # Check if setup already ran for this spec.
-    done_path = ws.setup_done_path
-    if done_path.exists():
-        recorded = done_path.read_text().strip()
-        if recorded == spec_hash:
-            return  # already done for this spec
-
     notify(f"running {len(setup)} setup command(s)...")
     for i, cmd in enumerate(setup):
         notify(f"  setup[{i}]: {cmd}")
@@ -236,10 +232,6 @@ def run_setup(ws: Workspace, cfg: dict, spec_hash: str, notify: Notify) -> None:
                 f"setup command failed (exit {r.returncode}): {cmd!r}\n"
                 f"The workspace container is left running for debugging."
             )
-
-    # Record success.
-    ws.ensure_state_dir()
-    done_path.write_text(spec_hash + "\n")
 
 
 def stop_workspace(ws: Workspace) -> None:
@@ -345,9 +337,9 @@ def start_workspace(ws: Workspace, notify: Notify = _noop) -> None:
     elif status != "running":
         docker.docker(["start", ws.ws_container])
 
-    # ---- setup (once per spec hash, only on a freshly created container) ----
+    # ---- setup (runs on every freshly created workspace container) ----
     if is_new_container:
-        run_setup(ws, cfg, spec_hash, notify)
+        run_setup(ws, cfg, notify)
 
 
 def delete_workspace(ws: Workspace) -> None:

@@ -65,8 +65,9 @@ image = "{image}"
 # Extra environment variables injected into the workspace container.
 # env = {{ GH_DEBUG = "1" }}
 
-# Shell commands run once after the workspace container is (re)created.
-# A failing command stops start and leaves the container for debugging.
+# Shell commands run on each freshly (re)created workspace container (as root),
+# so make them idempotent. A failing command stops start and leaves the
+# container for debugging.
 # setup = [
 #   "npm ci",
 # ]
