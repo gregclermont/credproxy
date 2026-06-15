@@ -384,6 +384,47 @@ async def test_setup_least_disclosure(aiohttp_client, app, state):
     # (they are never sent to the proxy in the push model).
 
 
+# ---- bootstrap CA bundle: combined system roots + proxy CA (issue #10) -------
+
+
+def test_bootstrap_sh_is_valid_posix_sh():
+    """The embedded bootstrap script must be valid POSIX sh -- guards the
+    escaping of the Python string literal (e.g. the `\\` line continuation)."""
+    import subprocess
+    r = subprocess.run(["sh", "-n"], input=bootstrap.BOOTSTRAP_SH,
+                       text=True, capture_output=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_bootstrap_sh_builds_combined_ca_bundle():
+    """The CA env-var bundle (/tmp/proxy-ca.crt) is the system roots PLUS the
+    proxy CA, so env-var-only tools (mise/node/cargo/aws/requests) verify
+    passthrough hosts too -- not just intercepted ones."""
+    sh = bootstrap.BOOTSTRAP_SH
+    # The proxy CA is downloaded to its OWN file, kept apart from the bundle.
+    assert 'curl -sf -o "$CA_ONLY" http://proxy.local/ca.crt' in sh
+    # Combined bundle = a system root bundle ++ the proxy CA.
+    assert 'cat "$SYS_CA" "$CA_ONLY" > "$CA_PATH"' in sh
+    # Both Debian/Ubuntu/Alpine and RHEL/Fedora root-bundle locations are probed.
+    assert "/etc/ssl/certs/ca-certificates.crt" in sh
+    assert "/etc/pki/tls/certs/ca-bundle.crt" in sh
+
+
+def test_bootstrap_sh_system_store_installs_only_proxy_ca():
+    """Regression guard: the system-store step installs the SINGLE proxy CA, not
+    the combined bundle -- else update-ca-certificates would re-append every
+    system root to the system store."""
+    sh = bootstrap.BOOTSTRAP_SH
+    assert 'cp "$CA_ONLY" /usr/local/share/ca-certificates/proxy.crt' in sh
+    assert 'cp "$CA_PATH" /usr/local/share/ca-certificates/proxy.crt' not in sh
+
+
+def test_ca_env_points_at_combined_bundle():
+    """Every CA env var points at the combined bundle, never the proxy-only file
+    -- the bundle is what makes both intercepted and passthrough hosts verify."""
+    assert set(bootstrap.CA_ENV.values()) == {"/tmp/proxy-ca.crt"}
+
+
 def test_workspace_bindings_function():
     """Unit test for the bootstrap.workspace_bindings free function."""
     creds = BindingCredentials(

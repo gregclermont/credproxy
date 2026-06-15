@@ -36,15 +36,37 @@ BOOTSTRAP_SH = """#!/bin/sh
 # Run via: curl -sSL http://proxy.local/bootstrap.sh | sh
 # Run as root (the default in most workspace images).
 set -eu
-CA_PATH=/tmp/proxy-ca.crt
+CA_ONLY=/tmp/proxy-ca-only.crt   # the proxy CA alone (1 cert)
+CA_PATH=/tmp/proxy-ca.crt        # system roots + proxy CA (what the env vars point at)
 PROFILE_PATH=/etc/profile.d/credproxy.sh
 
-curl -sf -o "$CA_PATH" http://proxy.local/ca.crt
+curl -sf -o "$CA_ONLY" http://proxy.local/ca.crt
+
+# Build the bundle the CA env vars point at: the system roots PLUS the proxy CA.
+# Tools that honor SSL_CERT_FILE/REQUESTS_CA_BUNDLE/etc. as their SOLE trust
+# anchor (mise, node, cargo, requests-via-certifi, aws) then verify BOTH
+# intercepted hosts (signed by the proxy CA) and passthrough hosts (real certs,
+# via the system roots). A proxy-CA-only bundle here breaks every passthrough host.
+SYS_CA=""
+for c in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt; do
+  if [ -f "$c" ]; then SYS_CA="$c"; break; fi
+done
+if [ -n "$SYS_CA" ]; then
+  cat "$SYS_CA" "$CA_ONLY" > "$CA_PATH"
+else
+  # No system root bundle (minimal image): fall back to proxy-CA-only, so
+  # intercepted hosts still work. Passthrough hosts will fail for env-var-only
+  # tools -- such images usually lack roots anyway; install ca-certificates.
+  cp "$CA_ONLY" "$CA_PATH"
+  echo "credproxy: no system CA bundle found; $CA_PATH has the proxy CA only -- env-var-only tools cannot verify passthrough hosts (install ca-certificates)" >&2
+fi
 
 # System-wide trust covers curl, git, openssl, python stdlib. Best-effort:
-# images without ca-certificates installed will skip this gracefully.
+# images without ca-certificates installed skip this gracefully. Install ONLY
+# the proxy CA (the single cert) here -- never the combined bundle, or
+# update-ca-certificates would re-append every system root to the system store.
 if command -v update-ca-certificates >/dev/null 2>&1; then
-  cp "$CA_PATH" /usr/local/share/ca-certificates/proxy.crt 2>/dev/null \\
+  cp "$CA_ONLY" /usr/local/share/ca-certificates/proxy.crt 2>/dev/null \\
     && update-ca-certificates >/dev/null 2>&1 || true
 fi
 
@@ -56,7 +78,7 @@ if [ -d /etc/profile.d ] && [ -w /etc/profile.d ]; then
   curl -sf http://proxy.local/env.sh > "$PROFILE_PATH"
 fi
 
-echo "Bootstrap complete. CA at $CA_PATH; env in $PROFILE_PATH."
+echo "Bootstrap complete. CA bundle at $CA_PATH; env in $PROFILE_PATH."
 """
 
 ENV_SH = "".join(f'export {k}="{v}"\n' for k, v in CA_ENV.items())
