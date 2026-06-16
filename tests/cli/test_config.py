@@ -30,8 +30,8 @@ def test_load_config_minimal(xdg, workspaces_dir):
     cfg = load_config(ws)
 
     assert cfg["image"] == "alpine:3"
-    assert cfg["home"] == "/root"          # DEFAULT_HOME fallback
-    assert cfg["mounts"] == []
+    assert cfg["home"] is None             # no home -> no managed home volume
+    assert cfg["mounts"] == []             # incl. no home volume
     assert cfg["env"] == {}
     assert cfg["setup"] == []
 
@@ -70,10 +70,12 @@ def test_load_config_full(xdg, tmp_path, workspaces_dir):
 
     assert cfg["image"] == "ubuntu:22.04"
     assert cfg["home"] == "/home/user"
-    assert len(cfg["mounts"]) == 1
-    assert cfg["mounts"][0]["source"] == str(src)
-    assert cfg["mounts"][0]["target"] == "/code"
-    assert cfg["mounts"][0]["readonly"] is False
+    # mounts = [home volume (sugar, prepended), the bind]
+    assert cfg["mounts"][0] == {"kind": "volume", "name": "home",
+                                "target": "/home/user", "readonly": False}
+    assert cfg["mounts"][1] == {"kind": "bind", "source": str(src),
+                                "target": "/code", "readonly": False}
+    assert len(cfg["mounts"]) == 2
     assert cfg["env"] == {"FOO": "bar"}
     assert cfg["setup"] == ["echo hi"]
 
@@ -216,6 +218,91 @@ def test_load_config_mount_target_not_absolute(xdg, tmp_path, workspaces_dir):
         load_config(ws)
 
 
+# ---- typed mounts: volume / profile / tables --------------------------------
+
+
+def _cfg(workspaces_dir, body):
+    from credproxy_cli.core.config import load_config
+    from credproxy_cli.core.workspace import Workspace
+    _write(workspaces_dir, "w", f'image = "x"\n{body}\n')
+    return load_config(Workspace("w"))
+
+
+def test_mount_volume_table(xdg, workspaces_dir):
+    cfg = _cfg(workspaces_dir, 'mounts = [{ volume = "cache", target = "/c" }]')
+    assert cfg["mounts"] == [{"kind": "volume", "name": "cache",
+                              "target": "/c", "readonly": False}]
+
+
+def test_mount_bind_table_with_readonly(xdg, tmp_path, workspaces_dir):
+    src = tmp_path / "code"; src.mkdir()
+    cfg = _cfg(workspaces_dir,
+               f'mounts = [{{ bind = "{src}", target = "/code", readonly = true }}]')
+    assert cfg["mounts"] == [{"kind": "bind", "source": str(src),
+                              "target": "/code", "readonly": True}]
+
+
+def test_mount_profile_resolves_and_defaults_readonly(xdg, workspaces_dir,
+                                                      tmp_path, monkeypatch):
+    prof = tmp_path / "profile"; prof.mkdir()
+    (prof / "gitconfig").write_text("[user]\n")
+    monkeypatch.setenv("CREDPROXY_PROFILE_DIR", str(prof))
+    cfg = _cfg(workspaces_dir,
+               'mounts = [{ profile = "gitconfig", target = "/g" }]')
+    assert cfg["mounts"] == [{"kind": "profile", "source": str(prof / "gitconfig"),
+                              "target": "/g", "readonly": True}]  # ro default
+
+
+def test_mount_profile_escape_rejected(xdg, workspaces_dir, tmp_path, monkeypatch):
+    from credproxy_cli.core.errors import ConfigError
+    prof = tmp_path / "profile"; prof.mkdir()
+    monkeypatch.setenv("CREDPROXY_PROFILE_DIR", str(prof))
+    with pytest.raises(ConfigError, match="escapes the profile dir"):
+        _cfg(workspaces_dir, 'mounts = [{ profile = "../secret", target = "/x" }]')
+
+
+def test_mount_profile_missing_source(xdg, workspaces_dir, tmp_path, monkeypatch):
+    from credproxy_cli.core.errors import ConfigError
+    prof = tmp_path / "profile"; prof.mkdir()
+    monkeypatch.setenv("CREDPROXY_PROFILE_DIR", str(prof))
+    with pytest.raises(ConfigError, match="does not exist"):
+        _cfg(workspaces_dir, 'mounts = [{ profile = "nope", target = "/x" }]')
+
+
+def test_mount_volume_bad_name(xdg, workspaces_dir):
+    from credproxy_cli.core.errors import ConfigError
+    with pytest.raises(ConfigError, match="invalid"):
+        _cfg(workspaces_dir, 'mounts = [{ volume = "bad/name", target = "/x" }]')
+
+
+def test_mount_table_needs_exactly_one_kind(xdg, workspaces_dir):
+    from credproxy_cli.core.errors import ConfigError
+    with pytest.raises(ConfigError, match="exactly one of bind/volume/profile"):
+        _cfg(workspaces_dir, 'mounts = [{ target = "/x" }]')
+
+
+def test_duplicate_mount_target_rejected(xdg, workspaces_dir):
+    from credproxy_cli.core.errors import ConfigError
+    with pytest.raises(ConfigError, match="two mounts target"):
+        _cfg(workspaces_dir,
+             'mounts = [{ volume = "a", target = "/x" }, { volume = "b", target = "/x" }]')
+
+
+def test_home_collides_with_explicit_home_volume(xdg, workspaces_dir):
+    """The `home` sugar reserves the volume name 'home'."""
+    from credproxy_cli.core.errors import ConfigError
+    with pytest.raises(ConfigError, match="two volumes named 'home'"):
+        _cfg(workspaces_dir,
+             'home = "/h"\nmounts = [{ volume = "home", target = "/other" }]')
+
+
+def test_optional_home_omitted(xdg, workspaces_dir):
+    """No `home` -> no home volume mount; cfg['home'] is None."""
+    cfg = _cfg(workspaces_dir, 'mounts = [{ volume = "cache", target = "/c" }]')
+    assert cfg["home"] is None
+    assert all(m["name"] != "home" for m in cfg["mounts"] if m["kind"] == "volume")
+
+
 def test_load_config_env_not_dict(xdg, workspaces_dir):
     from credproxy_cli.core.config import load_config
     from credproxy_cli.core.errors import ConfigError
@@ -292,7 +379,10 @@ def test_render_template_scaffolds_active_nonroot_devcontainer(xdg, workspaces_d
     assert cfg["map_host_user"] is True
     assert cfg["user_uid"] == 1000
     assert cfg["setup"] == ["curl -fsSL http://proxy.local/bootstrap.sh | sh"]
-    assert cfg["mounts"] == [] and cfg["env"] == {}
+    # the `home` sugar produces a managed home volume mount
+    assert cfg["mounts"] == [{"kind": "volume", "name": "home",
+                              "target": "/home/vscode", "readonly": False}]
+    assert cfg["env"] == {}
 
 
 # ---- spec hash ---------------------------------------------------------------

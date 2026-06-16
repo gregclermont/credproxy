@@ -32,13 +32,92 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 from .errors import ConfigError
-from .paths import DEFAULT_HOME, resolve_singleton
+from .paths import profile_dir, resolve_singleton
 from .workspace import Workspace
 
 import tomllib
+
+# A managed-volume name (the `volume`/`home` mount source). Docker-volume-name
+# safe; must start alnum.
+_VOLUME_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def _bind_source(raw_src: str, where: str) -> str:
+    """Resolve + validate a host-bind source: `~` expanded, absolute, exists."""
+    src = Path(os.path.expanduser(raw_src))
+    if not src.is_absolute():
+        raise ConfigError(f"{where} source must be absolute (after ~): {raw_src!r}")
+    if not src.exists():
+        raise ConfigError(f"{where} source does not exist: {src}")
+    return str(src)
+
+
+def _profile_source(rel: str, where: str) -> str:
+    """Resolve a profile-relative bind source under the active profile dir,
+    confined within it (no `..` escape), and require it to exist."""
+    base = profile_dir().resolve()
+    resolved = (base / rel).resolve()
+    if resolved != base and base not in resolved.parents:
+        raise ConfigError(f"{where} profile path {rel!r} escapes the profile dir")
+    if not resolved.exists():
+        raise ConfigError(
+            f"{where} profile source does not exist: {resolved} (under {base})"
+        )
+    return str(resolved)
+
+
+def _parse_mount(m, where: str) -> dict:
+    """One `mounts` entry -> a typed record
+    `{kind: bind|volume|profile, source|name, target, readonly}`.
+
+    String form is a host bind (`"SRC:DST[:ro]"`). Table form has exactly one of
+    `bind`/`volume`/`profile`, plus an absolute `target` and optional `readonly`
+    (profile mounts default to read-only -- they ship static assets)."""
+    if isinstance(m, str):
+        parts = m.split(":")
+        if len(parts) < 2 or len(parts) > 3 or (len(parts) == 3 and parts[2] != "ro"):
+            raise ConfigError(f'{where}: expected "SRC:DST" or "SRC:DST:ro", got {m!r}')
+        target = parts[1]
+        if not target.startswith("/"):
+            raise ConfigError(f"{where} target must be absolute: {target!r}")
+        return {"kind": "bind", "source": _bind_source(parts[0], where),
+                "target": target, "readonly": len(parts) == 3}
+
+    if not isinstance(m, dict):
+        raise ConfigError(f'{where} must be a string ("SRC:DST[:ro]") or a table')
+
+    kinds = [k for k in ("bind", "volume", "profile") if k in m]
+    if len(kinds) != 1:
+        raise ConfigError(f"{where} must have exactly one of bind/volume/profile")
+    kind = kinds[0]
+    extra = set(m) - {kind, "target", "readonly"}
+    if extra:
+        raise ConfigError(f"{where} unknown key(s): {', '.join(sorted(extra))}")
+    target = m.get("target")
+    if not isinstance(target, str) or not target.startswith("/"):
+        raise ConfigError(f"{where} target must be an absolute path")
+    ro = m.get("readonly")
+    if ro is not None and not isinstance(ro, bool):
+        raise ConfigError(f"{where} readonly must be a boolean")
+    val = m[kind]
+    if not isinstance(val, str) or not val:
+        raise ConfigError(f"{where} {kind} must be a non-empty string")
+
+    if kind == "bind":
+        return {"kind": "bind", "source": _bind_source(val, where),
+                "target": target, "readonly": bool(ro)}
+    if kind == "volume":
+        if not _VOLUME_NAME_RE.match(val):
+            raise ConfigError(f"{where} volume name {val!r} is invalid "
+                              f"(letters/digits/_.-, starting alnum)")
+        return {"kind": "volume", "name": val, "target": target,
+                "readonly": bool(ro)}
+    return {"kind": "profile", "source": _profile_source(val, where),
+            "target": target, "readonly": True if ro is None else bool(ro)}
 
 
 
@@ -68,47 +147,40 @@ def load_config(ws: Workspace) -> dict:
             f"`credproxy workspace create` writes one for you"
         )
 
-    # home
-    home = raw.get("home") or DEFAULT_HOME
-    if not isinstance(home, str) or not home.startswith("/"):
+    # home: optional. Sugar for a managed volume named "home" mounted at this
+    # path (image-seeded, persistent). Omit it -> no managed home volume; the
+    # container's home is the image's, ephemeral (gone on recreate).
+    home = raw.get("home")
+    if home is not None and (not isinstance(home, str) or not home.startswith("/")):
         raise ConfigError(f"{ws.config_path}: `home` must be an absolute path")
 
-    # mounts: list of "SRC:DST" or "SRC:DST:ro" strings
-    mounts = []
+    # mounts: typed list. A string is a host bind ("SRC:DST[:ro]"); a table is a
+    # bind/volume/profile mount. The `home` sugar prepends the home volume so it
+    # shares the uniqueness checks + emission path.
     raw_mounts = raw.get("mounts") or []
     if not isinstance(raw_mounts, list):
         raise ConfigError(f"{ws.config_path}: `mounts` must be an array")
-    for i, m in enumerate(raw_mounts):
-        if not isinstance(m, str):
-            raise ConfigError(
-                f"{ws.config_path}: mounts[{i}] must be a string (\"SRC:DST\" or \"SRC:DST:ro\")"
-            )
-        parts = m.split(":")
-        if len(parts) < 2 or len(parts) > 3:
-            raise ConfigError(
-                f"{ws.config_path}: mounts[{i}]: expected \"SRC:DST\" or \"SRC:DST:ro\", got {m!r}"
-            )
-        src = Path(os.path.expanduser(parts[0]))
-        if not src.is_absolute():
-            raise ConfigError(
-                f"{ws.config_path}: mounts[{i}] source must be absolute "
-                f"(after ~ expansion): {parts[0]!r}"
-            )
-        if not src.exists():
-            raise ConfigError(
-                f"{ws.config_path}: mounts[{i}] source does not exist: {src}"
-            )
-        target = parts[1]
-        if not target.startswith("/"):
-            raise ConfigError(
-                f"{ws.config_path}: mounts[{i}] target must be absolute: {target!r}"
-            )
-        readonly = len(parts) == 3 and parts[2] == "ro"
-        mounts.append({
-            "source": str(src),
-            "target": target,
-            "readonly": readonly,
-        })
+    mounts = [_parse_mount(m, f"{ws.config_path}: mounts[{i}]")
+              for i, m in enumerate(raw_mounts)]
+    if home:
+        mounts.insert(0, {"kind": "volume", "name": "home", "target": home,
+                          "readonly": False})
+
+    # No two mounts on the same target; no two volumes with the same name.
+    seen_targets: set[str] = set()
+    seen_vols: set[str] = set()
+    for m in mounts:
+        t = m["target"].rstrip("/") or "/"
+        if t in seen_targets:
+            raise ConfigError(f"{ws.config_path}: two mounts target {m['target']!r}")
+        seen_targets.add(t)
+        if m["kind"] == "volume":
+            if m["name"] in seen_vols:
+                raise ConfigError(
+                    f"{ws.config_path}: two volumes named {m['name']!r} "
+                    f"('home' names the home volume)"
+                )
+            seen_vols.add(m["name"])
 
     # env: inline table of string values
     env = raw.get("env") or {}
@@ -271,13 +343,12 @@ def quick_image(ws: Workspace) -> str:
 
 def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
     """Identity of the workspace container's launch spec. Changing the
-    image, home, mounts, env, setup, run_flags, map_host_user, user_uid, or the
-    proxy container (netns peer) yields a new hash, which `start` uses to decide
-    whether to recreate."""
+    image, mounts (incl. the home volume), env, setup, run_flags, map_host_user,
+    user_uid, or the proxy container (netns peer) yields a new hash, which
+    `start` uses to decide whether to recreate."""
     spec = json.dumps(
         {
             "image": cfg["image"],
-            "home": cfg["home"],
             "mounts": cfg["mounts"],
             "env": cfg["env"],
             "setup": cfg["setup"],

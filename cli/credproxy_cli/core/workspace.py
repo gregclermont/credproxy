@@ -99,8 +99,16 @@ class Workspace:
         return f"credproxy-ws-{self.name}"
 
     @property
-    def home_volume(self) -> str:
-        return f"credproxy-home-{self.name}"
+    def volume_prefix(self) -> str:
+        """Name prefix shared by all of this workspace's managed volumes -- used
+        to enumerate them for `delete`."""
+        return f"credproxy-vol-{self.name}-"
+
+    def volume(self, name: str) -> str:
+        """The Docker name of a managed volume declared as `name` in this
+        workspace (a `volume:` mount, or the `home` sugar). Namespaced per
+        workspace so two workspaces' `cache` volumes don't collide."""
+        return f"{self.volume_prefix}{name}"
 
     def exists(self) -> bool:
         """A workspace exists iff its config file exists."""

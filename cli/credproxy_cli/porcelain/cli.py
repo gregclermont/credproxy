@@ -219,13 +219,13 @@ def do_stop(ctx: Ctx, name: str | None) -> None:
     render.OUT.stopped(ws.name)
 
 
-def do_delete(ctx: Ctx, name: str | None) -> None:
+def do_delete(ctx: Ctx, name: str | None, keep_volumes: bool) -> None:
     implicit = name is None
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
     _confirm_destructive(ctx, ws, implicit, "delete")
     was_default = _is_default(ws)
-    lifecycle.delete_workspace(ws)
+    lifecycle.delete_workspace(ws, keep_volumes=keep_volumes)
     if was_default:
         pointer.clear_default()
     render.OUT.deleted(ws.name)
@@ -239,18 +239,18 @@ def do_apply(ctx: Ctx, name: str | None) -> None:
 
 
 def do_recreate(ctx: Ctx, name: str | None, include_proxy: bool,
-                reset_home: bool) -> None:
+                reset_volumes: list[str]) -> None:
     implicit = name is None
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
-    # Plain recreate keeps all persistent state, so it isn't gated. --reset-home
-    # wipes the home volume (the one recreate mode that destroys data), so it is
+    # Plain recreate keeps all persistent state, so it isn't gated. --reset-volume
+    # wipes a volume's data (the one recreate mode that destroys data), so it is
     # gated like delete: confirm on an implicit default workspace (loose surface).
-    if reset_home:
-        _confirm_destructive(ctx, ws, implicit, "reset the home volume of")
+    if reset_volumes:
+        _confirm_destructive(ctx, ws, implicit, "reset volume(s) of")
     lifecycle.recreate_workspace(ws, notify=say, include_proxy=include_proxy,
-                                 reset_home=reset_home)
-    render.OUT.recreated(ws.name, include_proxy, reset_home)
+                                 reset_volumes=reset_volumes)
+    render.OUT.recreated(ws.name, include_proxy, reset_volumes)
 
 
 def do_config(ctx: Ctx, name: str | None, declared: bool) -> None:
@@ -817,11 +817,16 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     # its CA). `--proxy`/`--all` also recreates the proxy (full re-bootstrap).
     p_recreate.add_argument("--proxy", "--all", dest="recreate_proxy",
                             action="store_true")
-    # Also wipe the persistent home volume (re-seeded from the image). Destroys
-    # data, so it's gated like delete; bind-mounted host dirs are untouched.
-    p_recreate.add_argument("--reset-home", dest="recreate_reset_home",
-                            action="store_true")
-    sub.add_parser("delete")
+    # Also wipe the named managed volume(s) (re-seeded from the image), e.g.
+    # `--reset-volume home`. Repeatable. Destroys data, so it's gated like
+    # delete; bind/profile (host-path) mounts are untouched.
+    p_recreate.add_argument("--reset-volume", dest="recreate_reset_volumes",
+                            action="append", metavar="NAME", default=[])
+    p_delete = sub.add_parser("delete")
+    # Keep the workspace's managed volumes instead of wiping them (they become
+    # orphans unless a same-named workspace is recreated).
+    p_delete.add_argument("--keep-volumes", dest="delete_keep_volumes",
+                          action="store_true")
     sub.add_parser("apply")
     sub.add_parser("inspect")
     p_config = sub.add_parser("config")
@@ -1006,20 +1011,23 @@ _VERB_HELP = {
         "Config and state survive; a later `start`/`enter` resumes."
     ),
     "recreate": (
-        "credproxy workspace NAME recreate [--proxy] [--reset-home] -- rebuild\n"
-        "the workspace container from a clean slate (re-runs setup), then start\n"
-        "it. Keeps the home volume, config, auth token, and state -- only the\n"
-        "container is replaced (unlike `delete`). `--proxy` (alias `--all`) also\n"
+        "credproxy workspace NAME recreate [--proxy] [--reset-volume NAME ...] --\n"
+        "rebuild the workspace container from a clean slate (re-runs setup), then\n"
+        "start it. Keeps all managed volumes, config, auth token, and state -- only\n"
+        "the container is replaced (unlike `delete`). `--proxy` (alias `--all`) also\n"
         "recreates the proxy container, regenerating its CA (full re-bootstrap).\n"
-        "`--reset-home` ALSO wipes the home volume (the container's ~, re-seeded\n"
-        "from the image) -- bind-mounted host dirs are untouched, and config /\n"
-        "token / state survive. It destroys data, so on the loose surface it\n"
-        "prompts for an implicit default workspace (pass --yes to bypass)."
+        "`--reset-volume NAME` (repeatable) ALSO wipes that managed volume,\n"
+        "re-seeded from the image (e.g. `--reset-volume home`) -- bind/profile\n"
+        "host-path mounts are untouched, and config/token/state survive. It\n"
+        "destroys data, so on the loose surface it prompts for an implicit default\n"
+        "workspace (pass --yes to bypass)."
     ),
     "delete": (
-        "credproxy workspace NAME delete -- remove both containers, the home\n"
-        "volume, the config file, and the state dir. Not reversible. (On the loose\n"
-        "surface, deleting the default workspace prompts first.)"
+        "credproxy workspace NAME delete [--keep-volumes] -- remove both\n"
+        "containers, the workspace's managed volumes, the config file, and the\n"
+        "state dir. `--keep-volumes` preserves the volumes (they orphan unless a\n"
+        "same-named workspace is recreated). Not reversible. (On the loose surface,\n"
+        "deleting the default workspace prompts first.)"
     ),
     "apply": (
         "credproxy workspace NAME apply -- reconcile a running workspace with its\n"
@@ -1152,11 +1160,11 @@ def _run_ws_verb(
     elif verb == "stop":
         do_stop(ctx, name)
     elif verb == "delete":
-        do_delete(ctx, name)
+        do_delete(ctx, name, a.delete_keep_volumes)
     elif verb == "apply":
         do_apply(ctx, name)
     elif verb == "recreate":
-        do_recreate(ctx, name, a.recreate_proxy, a.recreate_reset_home)
+        do_recreate(ctx, name, a.recreate_proxy, a.recreate_reset_volumes)
     elif verb == "inspect":
         do_inspect(ctx, name)
     elif verb == "config":

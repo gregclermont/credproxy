@@ -33,9 +33,9 @@ A complete example, with every key shown:
 # Workspace container image. The default ships a non-root sudo user (vscode).
 image = "mcr.microsoft.com/devcontainers/base:ubuntu"
 
-# Where the persistent home volume mounts inside the workspace. Point it at the
-# user's home so the volume is their home (the default image pre-creates
-# /home/vscode owned by vscode, so it seeds correctly — no chown needed).
+# Sugar for a managed volume named `home` mounted here (persistent, image-seeded).
+# Optional — omit for an ephemeral home. Point it at the user's home so the volume
+# is their home (the default image pre-creates /home/vscode owned by vscode).
 home = "/home/vscode"
 
 # User that `enter` runs as (docker exec -u). Must exist in the image (the
@@ -54,10 +54,14 @@ map_host_user = true
 # credproxy keeps control of -i/-t/-d. Exec-only.
 exec_flags = ["--workdir", "/srv"]
 
-# Host paths bind-mounted in. Each entry is "SRC:DST" or "SRC:DST:ro".
+# Things mounted in. A string is a host bind ("SRC:DST[:ro]"); a table is a typed
+# mount — a managed `volume` (persistent, image-seeded, ownership-clean) or a
+# `profile` mount (a path relative to the profile overlay, for static files).
 mounts = [
-  "~/code:/code",
-  "~/.gitconfig:/home/vscode/.gitconfig:ro",
+  "~/code:/code",                                          # host bind
+  "~/.gitconfig:/home/vscode/.gitconfig:ro",               # host bind, read-only
+  { volume = "cache", target = "/home/vscode/.cache" },    # managed volume
+  { profile = "gitconfig", target = "/home/vscode/.gitconfig" },  # profile file
 ]
 
 # Environment variables set in the workspace container.
@@ -96,8 +100,8 @@ hosts    = ["sts.amazonaws.com"]
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `image` | string | **required** | The workspace container image — your own image; never modified or privileged. `credproxy create` scaffolds this to a devcontainers base that ships a non-root sudo user (`vscode`, uid 1000) plus curl + ca-certificates (so the bootstrap and a non-root shell work with no setup), along with the matching `user`/`home`/`map_host_user`. To run a different image, edit `image` here (and `user`/`home` to match — the scaffold comments explain). There is no built-in default: `image` is mandatory, and omitting it is an error. |
-| `home` | string | `/root` | Mount point of the persistent home volume inside the container. Must be absolute. The volume survives stop/start and recreate; it is removed only by `delete`. |
-| `mounts` | list of strings | `[]` | Each entry is `"SRC:DST"` or `"SRC:DST:ro"`. `~` is expanded on `SRC`; `SRC` must be an existing absolute path, `DST` must be absolute. `:ro` makes the mount read-only. |
+| `home` | string | _(none)_ | Sugar for a managed volume named `home` mounted at this (absolute) path — the persistent, image-seeded home. **Optional**: omit it for an ephemeral home (the image's, lost on recreate). The volume survives stop/start and recreate; wiped by `recreate --reset-volume home` or `delete`. Also the default `workdir`. |
+| `mounts` | list | `[]` | Things mounted into the workspace. A **string** is a host **bind** (`"SRC:DST[:ro]"`; `~` expanded on `SRC`, which must be an existing absolute path; `DST` absolute). A **table** is a typed mount with exactly one of: `{ bind = "SRC", target = "/dst", readonly = false }` (host bind), `{ volume = "NAME", target = "/dst" }` (a managed named volume — persistent, image-seeded, ownership-clean; namespaced per workspace; great for caches), or `{ profile = "REL", target = "/dst" }` (a path **relative to the profile overlay dir**, confined within it, read-only by default — for static files shipped with a fork; see [forking.md](forking.md)). No two mounts may share a `target`; no two volumes a name (`home` is reserved for the home sugar). |
 | `env` | table (string → string) | `{}` | Passed to the container as `-e KEY=VALUE`. Both keys and values must be strings. |
 | `setup` | list of strings | `[]` | Shell commands run **once**, right after the container is (re)created, via `sh -lc`. A failing command stops `start` and leaves the container in place for debugging. Re-run only happens when the container is recreated (see drift below), not on every `start`. |
 | `run_flags` | list of strings | `[]` | Escape hatch: extra flags spliced into the workspace `docker run`. credproxy's structural flags (`--name`, labels, `--network`, the home volume) are applied **after** these and win on conflict, so `run_flags` can't detach the netns or rename the container; additive flags (`--userns`, an extra `--mount`/`-v`, `--security-opt`) take effect. The main use is runtime-specific uid mapping (see *Non-root user & mount ownership* below). |
@@ -334,16 +338,16 @@ what you changed:
   the proxy — no restart, no dropped connections.
 - **Container settings** (`image`, `home`, `mounts`, `env`, `setup`) cannot be
   changed on a live container. `apply` reports them as **deferred** with a hint;
-  `start` performs the recreate (preserving the home volume) and re-runs
+  `start` performs the recreate (preserving managed volumes) and re-runs
   `setup`. To force a rebuild on demand — even with no drift, e.g. to re-run
   `setup` or get a clean container — use `recreate` (workspace container only;
   `recreate --proxy` also rebuilds the proxy and regenerates its CA). Like
-  `start`, it preserves the home volume, config, token, and state. To *also*
-  start from a clean home, `recreate --reset-home` wipes the home volume (the
-  container's `~`, re-seeded from the image) while keeping the workspace defined
-  — config, token, and state survive, and bind-mounted host dirs are untouched.
-  It destroys data, so on the loose surface it prompts for an implicit default
-  (`--yes` bypasses).
+  `start`, it preserves all managed volumes, config, token, and state. To *also*
+  start from a clean volume, `recreate --reset-volume NAME` (repeatable, e.g.
+  `--reset-volume home`) wipes that managed volume — re-seeded from the image —
+  while keeping the workspace defined (config, token, and state survive, and
+  bind/profile host-path mounts are untouched). It destroys data, so on the loose
+  surface it prompts for an implicit default (`--yes` bypasses).
 
 `apply` reports what it applied versus deferred; `inspect` shows the same drift
 ahead of time, item by item. `start` always re-pushes bindings once the proxy is

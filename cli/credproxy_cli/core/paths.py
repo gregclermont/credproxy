@@ -139,12 +139,9 @@ def workspaces_state_dir() -> Path:
     return state_dir() / "workspaces"
 
 
-# CLI-only conventions.
+# CLI-only conventions. The workspace *image* is mandatory (no default -- the
+# scaffold writes a concrete one, `load_config` errors if missing), and `home`
+# is optional sugar for a managed volume (no default home path either), so the
+# only hardcoded distribution constant left is the proxy image tag.
 IMAGE_TAG = "credproxy:dev"          # the proxy image the CLI builds/runs
 DEFAULT_WORKSPACE = "default"
-# Fallback home (mount target) when a workspace omits `home`. The workspace
-# *image* is mandatory (no default) -- the scaffold writes a concrete one, and
-# `load_config` errors if it's missing -- so the default workspace image lives in
-# exactly one visible place: builtin/workspace.template.toml (overridable by the
-# profile overlay). The home target, by contrast, has a sensible universal.
-DEFAULT_HOME = "/root"

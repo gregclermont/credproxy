@@ -64,7 +64,8 @@ def test_workspace_paths_derived_from_name(xdg, workspaces_dir):
     assert ws.config_path.name == "myws.toml"
     assert ws.proxy_container == "credproxy-proxy-myws"
     assert ws.ws_container == "credproxy-ws-myws"
-    assert ws.home_volume == "credproxy-home-myws"
+    assert ws.volume("home") == "credproxy-vol-myws-home"
+    assert ws.volume_prefix == "credproxy-vol-myws-"
 
 
 def test_workspace_exists(xdg, workspaces_dir):

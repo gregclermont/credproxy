@@ -223,9 +223,14 @@ def test_map_host_user_noop_on_docker(xdg, ws_factory, monkeypatch):
 
 
 def _nested_cfg(**over):
+    # `mounts` override is a list of bind records (kind defaulted to "bind"); the
+    # home volume (the chown anchor) is always prepended, matching the new model.
+    binds = over.pop("mounts", [{"source": "/h/src/proj",
+                                 "target": "/home/vscode/src/proj", "readonly": False}])
+    binds = [m if "kind" in m else {"kind": "bind", **m} for m in binds]
     cfg = {"image": "x", "home": "/home/vscode",
-           "mounts": [{"source": "/h/src/proj", "target": "/home/vscode/src/proj",
-                       "readonly": False}],
+           "mounts": [{"kind": "volume", "name": "home", "target": "/home/vscode",
+                       "readonly": False}, *binds],
            "env": {}, "setup": [], "user": "vscode", "map_host_user": True}
     cfg.update(over)
     return cfg
@@ -956,17 +961,92 @@ def test_recreate_preserves_persistent_data(xdg, workspaces_dir, monkeypatch):
     assert ws.config_path.exists()                       # config kept
 
 
-def test_recreate_reset_home_drops_volume_after_container(xdg, workspaces_dir,
-                                                          monkeypatch):
-    """--reset-home drops the home volume -- AFTER removing the container that
+def test_recreate_reset_volume_drops_after_container(xdg, workspaces_dir,
+                                                     monkeypatch):
+    """--reset-volume drops the named volume -- AFTER removing the container that
     mounts it -- then starts; config still on disk (only the volume is wiped)."""
     from credproxy_cli.core import lifecycle
     ws = _write_ws(workspaces_dir, "rc4")
     rm_calls, started = _stub_recreate_deps(monkeypatch)
 
-    lifecycle.recreate_workspace(ws, reset_home=True)
+    lifecycle.recreate_workspace(ws, reset_volumes=["home", "cache"])
 
     assert rm_calls == [["rm", "-f", ws.ws_container],
-                        ["volume", "rm", ws.home_volume]]
+                        ["volume", "rm", ws.volume("home")],
+                        ["volume", "rm", ws.volume("cache")]]
     assert started == ["rc4"]
     assert ws.config_path.exists()                       # workspace stays defined
+
+
+# ---- typed-mount emission + generalized chown + volume lifecycle -------------
+
+
+def test_create_emits_volume_and_bind(xdg, ws_factory, monkeypatch):
+    """A managed volume is emitted as `-v <namespaced>:tgt`; a bind/profile as
+    `--mount type=bind`."""
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a")
+    ws.ensure_state_dir()
+    calls = _capture_docker_args(monkeypatch)
+    cfg = {"image": "x", "home": "/home/vscode", "env": {}, "setup": [],
+           "mounts": [
+               {"kind": "volume", "name": "home", "target": "/home/vscode", "readonly": False},
+               {"kind": "volume", "name": "cache", "target": "/c", "readonly": True},
+               {"kind": "bind", "source": "/h/code", "target": "/code", "readonly": False},
+           ]}
+    lifecycle.create_ws_container(ws, cfg, "deadbeef", proxy_id="pid")
+    args = calls[-1]
+    assert f"{ws.volume('home')}:/home/vscode" in args
+    assert f"{ws.volume('cache')}:/c:ro" in args
+    assert "type=bind,source=/h/code,target=/code" in args
+
+
+def test_mount_parent_dirs_under_nonhome_volume(xdg):
+    """The chown generalizes beyond home: a bind nested under any managed volume
+    gets its fabricated parents re-owned."""
+    from credproxy_cli.core.lifecycle import _mount_parent_dirs
+    cfg = {"mounts": [
+        {"kind": "volume", "name": "data", "target": "/data", "readonly": False},
+        {"kind": "bind", "source": "x", "target": "/data/a/proj", "readonly": False},
+    ]}
+    assert _mount_parent_dirs(cfg) == ["/data/a"]
+
+
+def test_mount_parent_dirs_skips_under_bind(xdg):
+    """A mount nested under a host BIND is never chowned (would touch host
+    ownership)."""
+    from credproxy_cli.core.lifecycle import _mount_parent_dirs
+    cfg = {"mounts": [
+        {"kind": "bind", "source": "/h", "target": "/code", "readonly": False},
+        {"kind": "bind", "source": "/h2", "target": "/code/sub/x", "readonly": False},
+    ]}
+    assert _mount_parent_dirs(cfg) == []
+
+
+def test_delete_removes_workspace_volumes(xdg, workspaces_dir, monkeypatch):
+    """delete enumerates the workspace's managed volumes (by prefix) and rms
+    them; --keep-volumes skips that."""
+    from credproxy_cli.core import lifecycle
+    ws = _write_ws(workspaces_dir, "d1")
+    other = f"credproxy-vol-other-home"
+    listed = "\n".join([ws.volume("home"), ws.volume("cache"), other])
+    monkeypatch.setattr(lifecycle.docker, "docker_output", lambda argv: listed)
+    rm: list = []
+    monkeypatch.setattr(lifecycle.docker, "docker_quiet", lambda argv: rm.append(argv))
+
+    lifecycle.delete_workspace(ws)
+    vol_rms = [a for a in rm if a[:2] == ["volume", "rm"]]
+    assert vol_rms == [["volume", "rm", ws.volume("home")],
+                       ["volume", "rm", ws.volume("cache")]]   # NOT other workspace's
+
+
+def test_delete_keep_volumes(xdg, workspaces_dir, monkeypatch):
+    from credproxy_cli.core import lifecycle
+    ws = _write_ws(workspaces_dir, "d2")
+    monkeypatch.setattr(lifecycle.docker, "docker_output",
+                        lambda argv: ws.volume("home"))
+    rm: list = []
+    monkeypatch.setattr(lifecycle.docker, "docker_quiet", lambda argv: rm.append(argv))
+
+    lifecycle.delete_workspace(ws, keep_volumes=True)
+    assert not any(a[:2] == ["volume", "rm"] for a in rm)

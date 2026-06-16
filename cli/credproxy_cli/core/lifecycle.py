@@ -60,7 +60,6 @@ def _write_applied_spec(ws: Workspace, cfg: dict, proxy_id: str | None) -> None:
     ws.ensure_state_dir()
     spec = {
         "image": cfg["image"],
-        "home": cfg["home"],
         "mounts": cfg["mounts"],
         "env": cfg["env"],
         "setup": cfg["setup"],
@@ -217,25 +216,32 @@ def _host_user_run_flags(cfg: dict) -> list[str]:
 
 
 def _mount_parent_dirs(cfg: dict) -> list[str]:
-    """Directories the container runtime fabricates (as container-root) for bind
-    targets nested under `home` -- the intermediate path components between the
-    home volume and each mount point.
+    """Directories the runtime fabricates (as container-root) for mount targets
+    nested under a managed *volume* -- the intermediate path components between
+    the enclosing volume and each mount point.
 
-    Derived from cfg["mounts"], the same list that produced the --mount flags, so
-    it matches exactly what the runtime created -- no in-container mountinfo scan.
-    A target one level under home (its parent IS the home volume) fabricates
-    nothing and is correctly owned; only deeper nesting yields work. Targets
-    outside home live in the ephemeral container layer and are skipped: inside the
-    credproxy-managed home volume the chown is provably host-safe."""
-    home = cfg["home"].rstrip("/")
+    Generalizes the old home-anchored rule to any volume mount. Re-owning a
+    fabricated parent is host-safe only when it lives inside a credproxy-managed
+    volume (or the ephemeral writable layer), never inside a **host bind** -- so
+    we chown the volume-enclosed case (the common nested mount, e.g. `~/src/app`
+    under the home volume) and skip anything under a bind. Writable-layer nesting
+    is left to the user (we can't know which ancestors the image already owns).
+    A mount point itself is never chowned -- it's owned by its own mount."""
+    volume_targets = sorted(
+        (m["target"].rstrip("/") or "/" for m in cfg["mounts"] if m["kind"] == "volume"),
+        key=len, reverse=True,
+    )
+    all_targets = {m["target"].rstrip("/") or "/" for m in cfg["mounts"]}
     dirs: set[str] = set()
     for m in cfg["mounts"]:
-        target = m["target"].rstrip("/")
-        if not target.startswith(home + "/"):
+        target = m["target"].rstrip("/") or "/"
+        enclosing = next((v for v in volume_targets if target.startswith(v + "/")), None)
+        if enclosing is None:
             continue
         d = posixpath.dirname(target)
-        while d != home and d != "/":
-            dirs.add(d)
+        while d != enclosing and d != "/":
+            if d not in all_targets:        # never chown another mount point
+                dirs.add(d)
             d = posixpath.dirname(d)
     return sorted(dirs)
 
@@ -296,14 +302,21 @@ def create_ws_container(
         "--security-opt", "label=disable",
         # Share the proxy's netns so all egress is captured.
         "--network", f"container:{ws.proxy_container}",
-        # Persistent home volume; seeded from the image's home on first run.
-        "-v", f"{ws.home_volume}:{cfg['home']}",
     ]
+    # Mounts, by kind. A managed `volume` (incl. the `home` sugar) is a named
+    # Docker volume, namespaced per workspace, image-seeded on first run. `bind`
+    # and `profile` (a profile-relative bind) are host binds.
     for m in cfg["mounts"]:
-        opt = f"type=bind,source={m['source']},target={m['target']}"
-        if m["readonly"]:
-            opt += ",readonly"
-        args += ["--mount", opt]
+        if m["kind"] == "volume":
+            opt = f"{ws.volume(m['name'])}:{m['target']}"
+            if m["readonly"]:
+                opt += ":ro"
+            args += ["-v", opt]
+        else:
+            opt = f"type=bind,source={m['source']},target={m['target']}"
+            if m["readonly"]:
+                opt += ",readonly"
+            args += ["--mount", opt]
     # Self-config breadcrumb: a tenant (e.g. an agent) that inspects its
     # environment finds the inward setup surface proactively, without first
     # having to trip a TLS-interception error and investigate it. Points at the
@@ -543,22 +556,32 @@ def start_workspace(ws: Workspace, notify: Notify = _noop,
         _write_setup_marker(ws, container_id)
 
 
+def _workspace_volumes(ws: Workspace) -> list[str]:
+    """This workspace's managed Docker volumes (by name prefix), or [] if none /
+    docker unavailable."""
+    try:
+        out = docker.docker_output(["volume", "ls", "--format", "{{.Name}}"])
+    except DockerError:
+        return []
+    return [n for n in out.splitlines() if n.startswith(ws.volume_prefix)]
+
+
 def recreate_workspace(ws: Workspace, notify: Notify = _noop,
                        include_proxy: bool = False,
-                       reset_home: bool = False) -> None:
+                       reset_volumes: list[str] | None = None) -> None:
     """Force-rebuild the workspace container (and the proxy too if
     `include_proxy`), then bring everything back up via `start_workspace`.
 
-    By default this preserves the home volume, config file, auth token, and
-    state dir -- only the container(s) are destroyed, so the persistent data
+    By default this preserves all managed volumes, the config file, auth token,
+    and state dir -- only the container(s) are destroyed, so persistent data
     survives and `setup` re-runs (the rebuilt container has a fresh id). It's
     "give me a clean container without losing my workspace".
 
-    `reset_home` additionally drops the persistent home *volume* (the container's
-    home), which `start_workspace` re-seeds from the image -- the one recreate
-    mode that destroys data, so callers gate it like `delete`. Bind-mounted host
-    dirs are a separate thing and are never touched (same promise as `delete`);
-    config/token/state still survive, so the workspace stays defined.
+    `reset_volumes` additionally drops the named managed volumes (e.g. `home`,
+    `cache`), which `start_workspace` re-seeds from the image -- the one recreate
+    mode that destroys data, so callers gate it like `delete`. Bind/profile mounts
+    are host paths and are never touched; config/token/state survive, so the
+    workspace stays defined.
 
     Removing the container(s) makes `start_workspace` see them absent and create
     fresh ones, reusing the still-running proxy when we keep it. Recreating the
@@ -570,23 +593,25 @@ def recreate_workspace(ws: Workspace, notify: Notify = _noop,
     if include_proxy:
         notify("recreating proxy container...")
         docker.docker_quiet(["rm", "-f", ws.proxy_container])
-    if reset_home:
-        # The container is already removed, so the home volume is free to drop;
-        # `start_workspace` re-creates it, seeded from the image's home. Only the
-        # named volume -- bind-mounted host project dirs are untouched.
-        notify("resetting home volume...")
-        docker.docker_quiet(["volume", "rm", ws.home_volume])
+    for name in (reset_volumes or []):
+        # The container is already removed, so the volume is free to drop;
+        # `start_workspace` re-creates it, seeded from the image.
+        notify(f"resetting volume '{name}'...")
+        docker.docker_quiet(["volume", "rm", ws.volume(name)])
     start_workspace(ws, notify=notify)
 
 
-def delete_workspace(ws: Workspace) -> None:
-    """Remove both containers, the home volume, the config file, and
-    the state dir. Best-effort on the Docker objects (absent ones are fine)."""
+def delete_workspace(ws: Workspace, keep_volumes: bool = False) -> None:
+    """Remove both containers, the workspace's managed volumes (unless
+    `keep_volumes`), the config file, and the state dir. Best-effort on the
+    Docker objects (absent ones are fine)."""
     import shutil
 
     docker.docker_quiet(["rm", "-f", ws.ws_container])
     docker.docker_quiet(["rm", "-f", ws.proxy_container])
-    docker.docker_quiet(["volume", "rm", ws.home_volume])
+    if not keep_volumes:
+        for vol in _workspace_volumes(ws):
+            docker.docker_quiet(["volume", "rm", vol])
     # Remove config file
     if ws.config_path.exists():
         ws.config_path.unlink()
@@ -659,8 +684,8 @@ def _compute_drift(
         # (the "never started" case is indicated by running=False + no record).
         pass
     else:
-        # Compare fields that feed the spec hash.
-        for field in ("image", "home", "env", "setup"):
+        # Compare fields that feed the spec hash. (`home` is folded into mounts.)
+        for field in ("image", "env", "setup"):
             configured_val = cfg[field]
             applied_val = applied_spec.get(field)
             if configured_val != applied_val:

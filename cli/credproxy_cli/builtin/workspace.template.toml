@@ -68,10 +68,16 @@ user_uid = 1000
 # mounts without changing host ownership, e.g. on rootless podman:
 # run_flags = ["--userns=keep-id:uid=1000,gid=1000"]
 
-# Host paths bind-mounted into the workspace. Each entry is
-# "SRC:DST" or "SRC:DST:ro"; ~ is expanded on SRC.
+# Things mounted into the workspace. A string entry is a host bind mount
+# ("SRC:DST" or "SRC:DST:ro"; ~ is expanded on SRC). A table entry is a typed
+# mount: a managed `volume` (a named Docker volume, persistent + image-seeded +
+# ownership-clean -- great for caches), or a `profile` mount (a path relative to
+# the profile overlay dir, for static files shipped with a fork; read-only by
+# default). The `home` setting above is itself sugar for a managed volume.
 # mounts = [
-#   "~/code:/code",
+#   "~/code:/code",                                            # host bind
+#   {{ volume = "cache", target = "/home/vscode/.cache" }},    # managed volume
+#   {{ profile = "gitconfig", target = "/home/vscode/.gitconfig" }},  # profile file
 # ]
 
 # Extra environment variables injected into the workspace container.

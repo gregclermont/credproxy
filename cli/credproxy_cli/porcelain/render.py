@@ -90,10 +90,11 @@ class Renderer:
         print(f"workspace '{name}' running")
 
     def recreated(self, name: str, include_proxy: bool = False,
-                  reset_home: bool = False) -> None:
+                  reset_volumes: list[str] | None = None) -> None:
         scope = "workspace + proxy containers" if include_proxy \
             else "workspace container"
-        extra = " (home volume reset)" if reset_home else ""
+        extra = f" (reset volume(s): {', '.join(reset_volumes)})" \
+            if reset_volumes else ""
         print(f"recreated {scope} for '{name}'{extra}; running")
 
     def stopped(self, name: str) -> None:
@@ -333,9 +334,9 @@ class JsonRenderer(Renderer):
         self._emit({"name": name, "running": True})
 
     def recreated(self, name: str, include_proxy: bool = False,
-                  reset_home: bool = False) -> None:
+                  reset_volumes: list[str] | None = None) -> None:
         self._emit({"name": name, "recreated": True, "proxy": include_proxy,
-                    "reset_home": reset_home, "running": True})
+                    "reset_volumes": reset_volumes or [], "running": True})
 
     def stopped(self, name: str) -> None:
         self._emit({"name": name, "running": False})

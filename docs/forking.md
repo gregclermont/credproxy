@@ -75,6 +75,17 @@ name as a builtin one **replaces** it; a new name **adds** it. The shapes match
 the builtin examples — see [`injectors.md`](injectors.md),
 [`providers.md`](providers.md), and `cli/credproxy_cli/builtin/presets/github.toml`.
 
+## Shipping static files (profile mounts)
+
+Beyond the registries, an overlay can hold **arbitrary static files** — a CA
+cert, an `.npmrc`, a `.gitconfig`, a setup script — and mount them into every
+workspace. In `workspace.template.toml` (or a workspace's `mounts`), a
+`{ profile = "REL", target = "/dst" }` mount binds a path **relative to the
+profile dir** into the container (confined within the profile dir, read-only by
+default). So the overlay becomes a self-contained bundle: declarative config
+*and* the static assets it references. See
+[`configuration.md`](configuration.md) `mounts`.
+
 ## Precedence and testing
 
 A user's `$XDG_CONFIG_HOME/credproxy/` file still wins over the profile overlay,
