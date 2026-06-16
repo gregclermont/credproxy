@@ -643,7 +643,7 @@ def wire_config(
     fetch_many: Callable[[str, list[str]], dict[str, str]] = provider_fetch_many,
 ) -> dict:
     """Resolve each binding's secret(s) and produce the proxy's bindings wire
-    shape (design-v3, scheme-aware):
+    shape (scheme-aware):
 
         {
           "bindings": [

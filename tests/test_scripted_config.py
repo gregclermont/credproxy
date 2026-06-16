@@ -1,4 +1,4 @@
-"""Proxy-side dispatch for scripted injection schemes (design-v3 phase 3b).
+"""Proxy-side dispatch for scripted injection schemes.
 
 config.load_resolved must accept a pushed `scheme: "script"` binding, compile
 the pushed `.star` source into a ScriptedScheme, validate it uniformly with the

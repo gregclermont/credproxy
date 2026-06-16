@@ -5,7 +5,7 @@ template references) via POST /admin/config. The host CLI is the supported
 producer; it resolves each binding's secret from its provider before posting.
 
 This module validates the parsed dict and produces a BindingCredentials
-instance. Wire schema (design-v3, scheme-aware):
+instance. Wire schema (scheme-aware):
 
     {
       "bindings": [
@@ -96,7 +96,7 @@ class BindingCredentials:
     """Credentials built from the bindings wire format.
 
     The host->transforms map is the *static* layer pushed via /admin/config.
-    `transforms_for` overlays a *runtime* layer (re-seal seam, design-v3): the
+    `transforms_for` overlays a *runtime* layer (re-seal seam): the
     substitution set must be a function over (static + runtime-augmentable),
     never baked immutable at push time, so dynamically-minted placeholders can
     be registered later. The runtime layer is empty until re-seal lands.

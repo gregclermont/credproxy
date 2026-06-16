@@ -1,4 +1,4 @@
-"""Starlark script registry for scripted injectors (design-v3 phase 3b).
+"""Starlark script registry for scripted injectors.
 
 A *scripted injector* (an injector with `scheme = "script"`) names a `.star`
 file that defines `on_request`/`on_response`. The host CLI resolves the file

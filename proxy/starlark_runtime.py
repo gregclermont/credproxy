@@ -1,4 +1,4 @@
-"""Sandboxed Starlark runtime for scripted injection schemes (design-v3).
+"""Sandboxed Starlark runtime for scripted injection schemes.
 
 A *scripted scheme* is the escape hatch for the long tail: a `.star` file that
 defines `on_request()` (and optionally `on_response()`) and composes the trusted
@@ -6,7 +6,7 @@ primitives the proxy provides. It runs IN the proxy, with access to the real
 credential via `secret()`, so it is sandboxed -- unlike providers, which run on
 the host in the user's own context.
 
-The API shape (design-v4, "option B"): primitives are FLAT top-level functions
+The API shape ("option B"): primitives are FLAT top-level functions
 with the ctx passed IMPLICITLY. A hook is zero-arg (`def on_request():`); the
 runtime binds the current ctx to a contextvar around the call and the primitives
 read it. So a script never threads or even holds a ctx handle -- it just calls

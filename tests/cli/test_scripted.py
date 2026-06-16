@@ -1,4 +1,4 @@
-"""Tests for the scripted-injector CLI path (design-v3 phase 3b): the scripts
+"""Tests for the scripted-injector CLI path: the scripts
 registry, scheme="script" injector parsing, and the wire shape (pushed source).
 """
 from __future__ import annotations

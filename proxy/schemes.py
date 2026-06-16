@@ -1,7 +1,7 @@
 """Injection schemes: the typed, scheme-aware request transforms.
 
 A *scheme* is the proxy-side mechanism that turns a credential into an
-outbound request. design-v3 splits schemes into two families:
+outbound request. Schemes split into two families:
 
   - **substitute** — the workspace holds an inert placeholder and sends it;
     the scheme finds it in its wire location and swaps in the real value,
@@ -264,7 +264,7 @@ class BasicScheme(_SubstituteScheme):
     component equal to the placeholder with the real value, re-encode.
 
     The placeholder is a BARE token (no hand-computed base64). We swap the
-    password component by default — design-v3's decision — but also accept the
+    password component by default — but also accept the
     placeholder in the username position, since some services (e.g. GitHub git
     over HTTPS) put the token there with a dummy password. The other component
     comes straight from the wire, so no username config is needed."""
@@ -540,7 +540,7 @@ class SigV4Scheme:
 
 
 class OAuth2ResealScheme:
-    """OAuth2 client-credentials re-seal (design-v3 phase 4).
+    """OAuth2 client-credentials re-seal.
 
     Two phases over ONE binding scoped to the TOKEN ENDPOINT host:
       - on_request: swap the inert placeholder in the request body for the real

@@ -5,7 +5,7 @@ IDENTICALLY to the Python built-ins (that's the point of dogfooding), the
 sandbox must reject `load()`, errors must fail closed, and a runaway must time
 out. A Python-vs-Starlark micro-benchmark reports the per-call cost.
 
-API shape (design-v4 "option B"): hooks are zero-arg (`def on_request():`) and
+API shape ("option B"): hooks are zero-arg (`def on_request():`) and
 primitives read an IMPLICIT ctx the runtime binds for the call -- a script never
 threads or holds a ctx. Stateful primitives are flat, prefixed `req_`/`resp_`
 which also encodes the phase.

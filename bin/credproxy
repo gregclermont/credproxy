@@ -4,7 +4,7 @@ egress proxy.
 
 Thin shim: locate the repo-relative package and hand off to its porcelain
 main() with the strict (default) surface. The human alias `credp` is a sibling
-shim that flips on the convenience surface; see bin/credp and design-v2.md for
+shim that flips on the convenience surface; see bin/credp for
 the substrate/wrapper split.
 """
 import sys

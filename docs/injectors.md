@@ -13,7 +13,7 @@ nothing to install.
 
 ## Schemes
 
-The proxy implements a small, fixed set of typed **schemes** (design-v3). An
+The proxy implements a small, fixed set of typed **schemes**. An
 injector picks one and parameterizes it; the explosion of services rides on top
 as configuration, not code. Schemes fall into two families:
 
@@ -318,7 +318,7 @@ prefix also encodes the **phase** they belong to:
   or `req_set_body` from `on_response()` raises (→ fail closed).
 - `resp_*` (and the re-seal `mint`/`mint_into_json`) are **response-phase
   only** — calling any of them from `on_request()` raises (→ fail closed). The
-  response phase is where design-v3 phase-4 re-seal runs.
+  response phase is where re-seal runs.
 
 **Credential & binding**
 
@@ -547,7 +547,7 @@ the script passes only the token value and TTL; it parses the body before
 registering the swap, so a non-JSON response fails closed without leaving a
 dangling runtime entry.
 
-> **Status (design-v3 phase 4).** The runtime, sandbox, and full primitive set
+> **Status (re-seal).** The runtime, sandbox, and full primitive set
 > are implemented: sign-family crypto (carrier `hmac_sha256` + `b64_to_hex`/
 > `hex_to_b64` for multi-round signing like AWS SigV4, plus `hmac_sha256_hex`,
 > `sha256_hex`, `sha1_hex`, `rs256_sign`), JWT (`jwt_encode_sign`,

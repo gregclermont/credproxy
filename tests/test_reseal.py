@@ -1,4 +1,4 @@
-"""Re-seal (design-v3 phase 4): the response-phase mint + dynamic-placeholder
+"""Re-seal: the response-phase mint + dynamic-placeholder
 store.
 
 A dynamic placeholder is just a static one registered at runtime with a TTL, so

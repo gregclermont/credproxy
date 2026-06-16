@@ -40,7 +40,6 @@ Both surfaces share the same core; `--json` is available on either for machine-r
 
 ## Further reading
 
-- `design-v2.md` — full design spec: concepts, security model, CLI grammar, extensibility
 - `docs/configuration.md` — workspace config: the TOML file format and the CLI that edits it
 - `docs/workspace.md` — netns constraints, bootstrap guide, egress shape
 - `docs/injectors.md` — injector TOML format (how a credential is shaped into a request)

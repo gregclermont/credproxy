@@ -4,7 +4,7 @@ A preset packages the multi-binding shape a single credential needs across a
 service's hosts and schemes -- e.g. a GitHub PAT is `bearer` on api.github.com
 but HTTP `basic` on github.com / ghcr.io. The generated bindings share ONE
 bare-token placeholder, so there is no hand-computed base64 and no fragile
-cross-binding coupling (design-v3, #3). A preset is pure host-side config
+cross-binding coupling. A preset is pure host-side config
 generation: it produces ordinary `[[binding]]` blocks; the proxy never sees a
 "preset". Editing or removing the generated bindings afterwards is normal.
 

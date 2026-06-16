@@ -7,7 +7,7 @@ mapping its exit codes to typed errors. The CLI pushes the *resolved* values
 to the proxy; the protocol deliberately says nothing about who the parent is
 (today the CLI, tomorrow maybe a daemon).
 
-The protocol is **batch-native** (design-v3): one invocation carries a list of
+The protocol is **batch-native**: one invocation carries a list of
 refs and returns a ref->value map. This means a binding's whole multi-slot
 credential resolves in a single exec -- an interactive provider prompts once,
 a vault provider can coalesce same-item refs. A single value is just a list of

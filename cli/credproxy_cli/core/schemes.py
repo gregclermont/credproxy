@@ -117,7 +117,7 @@ def build_script_spec(
 
 def merge_params(spec: SchemeSpec, params: dict | None) -> dict:
     """Overlay the injector's `[params]` onto the scheme's defaults. Unknown
-    keys are kept (schemes may accept open params — design-v3 re-seal seam),
+    keys are kept (schemes may accept open params),
     so this never rejects an extra key; it only fills defaults."""
     merged = dict(spec.param_defaults)
     if params:

@@ -1,4 +1,4 @@
-"""Proxy-side placeholder generator (design-v3 re-seal seam 4).
+"""Proxy-side placeholder generator (the re-seal mint seam).
 
 A re-seal scheme mints a placeholder at response time for a runtime-derived
 secret, exactly as the CLI generates one at authoring time. The pattern

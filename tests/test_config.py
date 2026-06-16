@@ -1,7 +1,7 @@
 """Tests for proxy/config.py — load_resolved schema validation.
 
 The proxy receives an already-resolved config dict (bindings wire format,
-design-v3 scheme-aware); secret resolution happens client-side (bin/credproxy).
+scheme-aware); secret resolution happens client-side (bin/credproxy).
 config.load_resolved validates the shape and produces a BindingCredentials.
 """
 import pytest

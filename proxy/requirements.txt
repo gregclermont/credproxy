@@ -1,7 +1,7 @@
 mitmproxy>=10.0
 aiohttp>=3.9
 pyyaml>=6.0
-# Sandboxed Starlark runtime for scripted injection schemes (design-v3 phase 3).
+# Sandboxed Starlark runtime for scripted injection schemes.
 # Prebuilt manylinux cp312 wheels -> no Rust toolchain in the image. We use
 # Module.add_callable / parse / eval / freeze / FrozenModule.call; a runaway
 # deadline rides on the call-path check_cancelled kwarg when present (feature-

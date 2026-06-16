@@ -1,5 +1,5 @@
 """Tests for proxy/addon.py — HostnameLogger intercept decision and scheme
-injection (design-v3 scheme-aware transforms)."""
+injection (scheme-aware transforms)."""
 import base64
 from types import SimpleNamespace
 

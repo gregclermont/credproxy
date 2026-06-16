@@ -1,6 +1,6 @@
 """Tests for the `current` meta command and ad-hoc `binding test` mode.
 
-Both were added to close design-v2 naming-reference gaps: `current` prints
+Both were added to close naming-reference gaps: `current` prints
 the default workspace, and `binding test --provider/--secret` exercises a
 definition before it is bound (no workspace required). The builtin `env`
 provider is used as the standalone subject under test.

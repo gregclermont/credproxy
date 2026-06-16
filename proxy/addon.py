@@ -9,7 +9,7 @@ the SNI.
 
 The `response` hook runs each transform's `on_response` (a no-op for the
 substitute family today; the seam the re-seal schemes will use to mint and
-register dynamic placeholders -- design-v3).
+register dynamic placeholders).
 
 The addon reads `state.creds` fresh on every call (rather than caching it at
 construction) so an in-process config reload -- admin_config swapping
@@ -77,7 +77,7 @@ class HostnameLogger:
         print(f"[http] {req.method} {host}{path}{marker}", flush=True)
 
     def response(self, flow: http.HTTPFlow) -> None:
-        # Re-seal seam (design-v3): plumbed from day one, no-op until a scheme
+        # Re-seal seam: plumbed from day one, no-op until a scheme
         # uses on_response. Iterate the same transforms so a future re-seal
         # scheme can mint a token from the response and register a dynamic
         # placeholder via creds.register_runtime(...).

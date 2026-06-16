@@ -1,4 +1,4 @@
-"""CLI-side coverage for the re-seal injectors (design-v3 phase 4): the built-in
+"""CLI-side coverage for the re-seal injectors: the built-in
 oauth2-reseal scheme in the catalog, the scripted oauth-reseal twin, list-valued
 params (api_hosts), and the wire shape.
 """

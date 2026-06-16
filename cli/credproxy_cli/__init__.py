@@ -1,9 +1,8 @@
 """credproxy host CLI.
 
 A credproxy *workspace* is a named, persistent pair of containers -- a
-proxy container and a workspace container sharing one netns. See
-design-v1.md for the container model; design-v2.md for the core/porcelain
-split and XDG storage layout this package implements.
+proxy container and a workspace container sharing one netns. This package
+implements the core/porcelain split and XDG storage layout.
 
 The package is laid out in two layers:
 
