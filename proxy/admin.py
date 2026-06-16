@@ -143,6 +143,12 @@ async def admin_config(request: web.Request) -> web.Response:
     except config.ConfigError as e:
         return web.json_response({"error": str(e)}, status=400)
 
+    # Carry the live runtime (re-seal) layer across the swap, so a routine
+    # re-push (apply/start) doesn't drop an in-flight minted token's dynamic
+    # placeholder. The static pushed layer is replaced; the runtime layer is
+    # augmentable, not baked immutable at push time.
+    new_creds.adopt_runtime(state.creds)
+
     # The whole body (including an optional `fingerprint` the host sends to mark
     # this config version) is persisted to tmpfs; load_resolved ignores keys
     # other than `bindings`.

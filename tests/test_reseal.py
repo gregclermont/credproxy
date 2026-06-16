@@ -444,3 +444,53 @@ def test_scripted_reseal_fails_closed_when_on_response_raises():
     log.response(flow)
     assert flow.response.status_code == 502
     assert b"REAL-MINTED-TOKEN" not in flow.response.content
+
+
+# ---- V4 M4: the live runtime layer survives a config re-push -----------------
+
+def _bearer_transform(name, ph, real):
+    return config.Transform(name, schemes.SCHEMES["bearer"],
+                            {"header": "Authorization"}, ph, {"value": real})
+
+
+def test_adopt_runtime_carries_live_entries():
+    clock = [0.0]
+    old = config.BindingCredentials({}, clock=lambda: clock[0])
+    old.register_runtime("api.example.com", _bearer_transform("r", "PH", "TOK"), ttl=100)
+    new = config.BindingCredentials({}, clock=lambda: clock[0])
+    new.adopt_runtime(old)
+    assert [t.name for t in new.transforms_for("api.example.com")] == ["r"]
+    assert new.intercepts("api.example.com")          # the API host stays intercepted
+
+
+def test_adopt_runtime_drops_expired_entries():
+    clock = [0.0]
+    old = config.BindingCredentials({}, clock=lambda: clock[0])
+    old.register_runtime("api.example.com", _bearer_transform("r", "PH", "TOK"), ttl=10)
+    clock[0] = 20.0                                   # past the TTL
+    new = config.BindingCredentials({}, clock=lambda: clock[0])
+    new.adopt_runtime(old)
+    assert new.transforms_for("api.example.com") == []
+
+
+def test_minted_token_survives_config_repush():
+    """A routine /admin/config re-push (apply/start) rebuilds creds; the live
+    re-seal placeholder for an already-minted token must carry over, or the
+    in-flight token becomes unresolvable until the next mint."""
+    creds = _reseal_creds()
+    [t] = creds.transforms_for("oauth.example.com")
+    flow = tflow.tflow(resp=True)
+    flow.response.status_code = 200
+    flow.response.text = json.dumps({"access_token": "MINTED", "expires_in": 3600})
+    minter = config.RuntimeMinter(creds, placeholders.generate)
+    ctx = schemes.ResponseCtx(flow, t.secrets, t.params, t.placeholder, minter=minter)
+    assert t.scheme.on_response(ctx) is True
+    [swap] = creds.transforms_for("api.example.com")
+    assert swap.secrets == {"value": "MINTED"}
+
+    # Re-push: fresh creds (no runtime) + adopt the live layer (what admin does).
+    new = _reseal_creds()
+    assert new.transforms_for("api.example.com") == []
+    new.adopt_runtime(creds)
+    [survived] = new.transforms_for("api.example.com")
+    assert survived.secrets == {"value": "MINTED"}    # minted token preserved

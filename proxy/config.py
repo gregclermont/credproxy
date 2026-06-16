@@ -155,6 +155,27 @@ class BindingCredentials:
         expires_at = (self._clock() + ttl) if ttl is not None else None
         self._runtime.setdefault(host.lower(), []).append((transform, expires_at))
 
+    def adopt_runtime(self, other) -> None:
+        """Carry `other`'s still-live runtime (re-seal) transforms into this
+        instance. Used when POST /admin/config swaps creds: the STATIC pushed
+        layer is replaced, but a minted token registered at re-seal time (a
+        dynamic placeholder with a TTL) must survive the swap -- otherwise a
+        routine re-push (apply/start) silently drops an in-flight minted token,
+        making it unresolvable until the next mint. The swap set is 'static +
+        runtime-augmentable', never baked immutable at push time (CLAUDE.md).
+
+        Absolute `expires_at` values transfer directly: both instances share the
+        same monotonic clock (same process), so a copied entry keeps its original
+        expiry. Defensive against a duck-typed `other` with no runtime layer."""
+        other_runtime = getattr(other, "_runtime", None)
+        if not other_runtime:
+            return
+        now = self._clock()
+        for host, entries in other_runtime.items():
+            live = [(t, e) for (t, e) in entries if e is None or e > now]
+            if live:
+                self._runtime.setdefault(host, []).extend(live)
+
     def _live(self, host: str) -> list[Transform]:
         """Non-expired runtime transforms for `host`, pruning expired ones in
         place so the store can't grow without bound."""
