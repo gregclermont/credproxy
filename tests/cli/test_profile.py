@@ -1,9 +1,8 @@
 """Tests for the distribution profile overlay (the org/fork customization tier).
 
 Resolution is three tiers -- user (XDG) > profile overlay > builtin -- selected
-by CREDPROXY_PROFILE_DIR. These verify: the builtin defaults load with no
-overlay; a partial profile.toml overrides a subset; and an overlay definition
-(injector / preset) and the scaffold template shadow the builtin ones.
+by CREDPROXY_PROFILE_DIR. These verify that an overlay's scaffold template and
+definitions (injector / preset) shadow the builtin ones.
 """
 from __future__ import annotations
 
@@ -19,60 +18,20 @@ def profile_overlay(tmp_path, monkeypatch):
     return d
 
 
-# ---- profile.toml constants --------------------------------------------------
-
-
-def test_builtin_profile_loads_without_overlay(xdg, monkeypatch, tmp_path):
-    """With the overlay pointed at an empty dir, profile() is the builtin
-    default."""
-    monkeypatch.setenv("CREDPROXY_PROFILE_DIR", str(tmp_path / "empty"))
-    from credproxy_cli.core.profile import profile
-    p = profile()
-    assert p.default_image == "mcr.microsoft.com/devcontainers/base:ubuntu"
-    assert p.image_tag == "credproxy:dev"
-    assert p.default_user == "vscode"
-
-
-def test_overlay_overrides_subset_of_constants(xdg, profile_overlay):
-    """A partial profile.toml overrides only its keys; the rest fall back."""
-    (profile_overlay / "profile.toml").write_text(
-        'default_image = "registry.acme.example/base:1"\n'
-        'image_tag = "acme-credproxy:latest"\n'
-    )
-    from credproxy_cli.core.profile import profile
-    p = profile()
-    assert p.default_image == "registry.acme.example/base:1"   # overridden
-    assert p.image_tag == "acme-credproxy:latest"              # overridden
-    assert p.default_user == "vscode"                          # fallback
-    assert p.generic_home == "/root"                           # fallback
-
-
-def test_overlay_default_image_drives_scaffold(xdg, profile_overlay):
-    """render_template wires the active block when the workspace image equals the
-    overlay's default_image (proving the conditional keys on the profile)."""
-    (profile_overlay / "profile.toml").write_text(
-        'default_image = "acme/base:1"\n'
-        'default_user = "acme"\n'
-        'default_home = "/home/acme"\n'
-    )
-    from credproxy_cli.core.config import render_template
-    text = render_template("w", "acme/base:1")
-    assert 'image = "acme/base:1"' in text
-    assert 'user = "acme"' in text and 'home = "/home/acme"' in text
-    assert "map_host_user = true" in text
-
-
 # ---- workspace.template.toml -------------------------------------------------
 
 
 def test_overlay_template_shadows_builtin(xdg, profile_overlay):
+    """An overlay's literal workspace.template.toml is used over the builtin
+    (only `{name}` is substituted)."""
     (profile_overlay / "workspace.template.toml").write_text(
-        '# ACME workspace\nimage = "{image}"\n# acme-marker\n'
+        '# ACME workspace {name}\nimage = "acme/base:1"\n# acme-marker\n'
     )
     from credproxy_cli.core.config import render_template
-    text = render_template("w", "acme/base:1")
+    text = render_template("w")
     assert "acme-marker" in text
-    assert 'image = "acme/base:1"' in text
+    assert "ACME workspace w" in text          # {name} substituted
+    assert 'image = "acme/base:1"' in text     # the overlay's literal image
 
 
 # ---- definitions: injectors --------------------------------------------------

@@ -11,7 +11,7 @@ import subprocess
 from dataclasses import dataclass
 
 from .errors import ImageError
-from .profile import profile
+from .paths import IMAGE_TAG
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,7 @@ class ImageEnv:
 
     @classmethod
     def load(cls, image: str | None = None) -> "ImageEnv":
-        image = image or profile().image_tag
+        image = image or IMAGE_TAG
         try:
             out = subprocess.check_output(
                 ["docker", "inspect", image], stderr=subprocess.PIPE

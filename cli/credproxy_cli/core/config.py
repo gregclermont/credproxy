@@ -35,9 +35,8 @@ import os
 from pathlib import Path
 
 from .errors import ConfigError
-from .paths import resolve_singleton
+from .paths import DEFAULT_HOME, resolve_singleton
 from .workspace import Workspace
-from .profile import profile
 
 import tomllib
 
@@ -60,13 +59,17 @@ def load_config(ws: Workspace) -> dict:
     if not isinstance(raw, dict):
         raise ConfigError(f"{ws.config_path}: top level must be a table")
 
-    # image
-    image = raw.get("image") or profile().default_image
-    if not isinstance(image, str):
-        raise ConfigError(f"{ws.config_path}: `image` must be a string")
+    # image (mandatory -- the scaffold writes a concrete one; there is no
+    # built-in default image to fall back to).
+    image = raw.get("image")
+    if not isinstance(image, str) or not image:
+        raise ConfigError(
+            f"{ws.config_path}: `image` is required (a non-empty string) -- "
+            f"`credproxy workspace create` writes one for you"
+        )
 
     # home
-    home = raw.get("home") or profile().generic_home
+    home = raw.get("home") or DEFAULT_HOME
     if not isinstance(home, str) or not home.startswith("/"):
         raise ConfigError(f"{ws.config_path}: `home` must be an absolute path")
 
@@ -261,7 +264,7 @@ def quick_image(ws: Workspace) -> str:
     """Best-effort `image` read for `list`, without full validation."""
     try:
         raw = tomllib.loads(ws.config_path.read_text())
-        return raw.get("image") or profile().default_image
+        return raw.get("image") or "?"
     except Exception:
         return "?"
 
@@ -288,61 +291,17 @@ def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:
     return hashlib.sha256(spec.encode()).hexdigest()[:16]
 
 
-def _active_setup_block(setup_cmds: tuple[str, ...]) -> str:
-    """The ACTIVE `setup = [...]` block for the distribution's default image,
-    seeded from the profile's `default_setup`."""
-    body = "".join(f'  "{c}",\n' for c in setup_cmds)
-    return (
-        "# Commands run as root on each (re)created container; make them\n"
-        "# idempotent. The default installs the proxy CA so HTTPS interception\n"
-        '# works immediately; add your own (e.g. "npm ci") to the list.\n'
-        "setup = [\n"
-        f"{body}"
-        "]"
-    )
-
-
-_COMMENTED_SETUP_BLOCK = (
-    "# Commands run as root on each (re)created container; make them\n"
-    "# idempotent. A failing command stops start and leaves the container\n"
-    "# for debugging. On an image with curl + update-ca-certificates, add\n"
-    '# the proxy-CA bootstrap so HTTPS interception works:\n'
-    '#   "curl -fsSL http://proxy.local/bootstrap.sh | sh"\n'
-    "# setup = [\n"
-    '#   "npm ci",\n'
-    "# ]"
-)
-
-
-def render_template(name: str, image: str) -> str:
-    """Scaffold a workspace TOML from the resolved template (profile overlay,
-    else builtin default). When `image` is the distribution's default image, the
-    user/home/map_host_user/setup lines are written ACTIVE (so a fresh workspace
-    lands in a non-root sudo shell that owns its bind mounts, with the proxy CA
-    installed); for any other `--image` the user is unknown, so those lines stay
-    commented hints. The frame and the distribution defaults are both data (the
-    template file + profile.toml), so a fork customizes them without code."""
-    p = profile()
+def render_template(name: str) -> str:
+    """Scaffold a workspace TOML from the resolved template (the profile overlay's
+    if present, else the builtin default). The template is a literal workspace
+    config -- its image, user, home, and setup are concrete values; only `{name}`
+    is substituted. To use a different image, edit the scaffolded file (the
+    template's comments show what to adjust), or override the template in a
+    profile overlay (see docs/forking.md)."""
     path = resolve_singleton("workspace.template.toml")
     if path is None:
         raise ConfigError(
             "no workspace.template.toml found (looked in the profile overlay "
             "and builtin defaults)"
         )
-    if image == p.default_image:
-        frag = dict(
-            home_line=f'home = "{p.default_home}"',
-            user_line=f'user = "{p.default_user}"',
-            map_line="map_host_user = true",
-            user_uid_line=f"user_uid = {p.default_uid}",
-            setup_block=_active_setup_block(p.default_setup),
-        )
-    else:
-        frag = dict(
-            home_line=f'# home = "{p.generic_home}"',
-            user_line='# user = "dev"',
-            map_line="# map_host_user = true",
-            user_uid_line="# user_uid = 1000",
-            setup_block=_COMMENTED_SETUP_BLOCK,
-        )
-    return path.read_text().format(name=name, image=image, **frag)
+    return path.read_text().format(name=name)

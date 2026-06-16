@@ -95,7 +95,7 @@ hosts    = ["sts.amazonaws.com"]
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `image` | string | `mcr.microsoft.com/devcontainers/base:ubuntu` | The workspace container image — your own image; never modified or privileged. The default is a devcontainers base that ships a non-root sudo user (`vscode`, uid 1000) plus curl + ca-certificates, so the bootstrap and a non-root shell work with no setup; `credproxy create` scaffolds the matching `user`/`home`/`map_host_user`. A `--image` override leaves those commented (its user is unknown). |
+| `image` | string | **required** | The workspace container image — your own image; never modified or privileged. `credproxy create` scaffolds this to a devcontainers base that ships a non-root sudo user (`vscode`, uid 1000) plus curl + ca-certificates (so the bootstrap and a non-root shell work with no setup), along with the matching `user`/`home`/`map_host_user`. To run a different image, edit `image` here (and `user`/`home` to match — the scaffold comments explain). There is no built-in default: `image` is mandatory, and omitting it is an error. |
 | `home` | string | `/root` | Mount point of the persistent home volume inside the container. Must be absolute. The volume survives stop/start and recreate; it is removed only by `delete`. |
 | `mounts` | list of strings | `[]` | Each entry is `"SRC:DST"` or `"SRC:DST:ro"`. `~` is expanded on `SRC`; `SRC` must be an existing absolute path, `DST` must be absolute. `:ro` makes the mount read-only. |
 | `env` | table (string → string) | `{}` | Passed to the container as `-e KEY=VALUE`. Both keys and values must be strings. |
@@ -306,7 +306,7 @@ file. You can always skip the command and edit the TOML directly.
 
 | Command | Effect on the config |
 |---|---|
-| `credproxy workspace create NAME [--image IMG]` | Scaffold `<name>.toml` (and the state dir + `auth.token`). Does not start anything. |
+| `credproxy workspace create NAME` | Scaffold `<name>.toml` (and the state dir + `auth.token`) from the workspace template. Does not start anything. To use a non-default image, edit the scaffolded `image`. |
 | `credproxy workspace NAME binding add --injector I --provider P --secret REF --host H [--host H…] [--name N] [--placeholder PH] [--env E]` | Append a `[[binding]]` block, materializing `name`/`placeholder` immediately. Validates the whole set before writing, so a rejected binding never lands in the file. Repeat `--secret SLOT=REF` for a multi-slot secret; a single `--secret SLOT=REF` works too when `SLOT` is the scheme's slot name (e.g. `jwt-bearer`'s `private_key`). |
 | `credproxy workspace NAME binding add --preset PRESET --provider P --secret REF` | Generate a coordinated binding set from a preset (e.g. `github`), all sharing one placeholder. The preset manages name/placeholder/env/host. |
 | `credproxy workspace NAME binding remove BINDING_NAME` | Remove that binding's block (surgical text edit). Reversible in principle, but loses tuning — gated by confirmation when targeting the default workspace on the loose surface. |

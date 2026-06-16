@@ -39,8 +39,7 @@ from .config import (
 from .errors import DockerError, ImageError, ProxyError, WorkspaceError
 from .imageenv import ImageEnv
 from .workspace import Workspace, ensure_token
-from .paths import PROXY_DIR
-from .profile import profile
+from .paths import IMAGE_TAG, PROXY_DIR
 from .proxy_http import proxy_status, push_config, wait_for_ready
 
 Notify = Callable[[str], None]
@@ -115,13 +114,13 @@ def _load_applied_bindings(ws: Workspace) -> list[dict] | None:
         return None
 
 
-def create_workspace_files(ws: Workspace, image: str) -> None:
+def create_workspace_files(ws: Workspace) -> None:
     if ws.exists():
         raise WorkspaceError(
             f"workspace '{ws.name}' already exists ({ws.config_path})"
         )
     ws.config_path.parent.mkdir(parents=True, exist_ok=True)
-    ws.config_path.write_text(render_template(ws.name, image))
+    ws.config_path.write_text(render_template(ws.name))
     ensure_token(ws)
 
 
@@ -161,7 +160,7 @@ def create_proxy(ws: Workspace, meta: ImageEnv) -> None:
     # relabel) so the proxy can read it under enforcing SELinux; no-op without.
     if PROXY_DIR.is_dir():
         args += ["-v", f"{PROXY_DIR}:{meta.source}:z"]
-    args.append(profile().image_tag)
+    args.append(IMAGE_TAG)
     docker.docker(args)
 
 
@@ -451,7 +450,7 @@ def start_workspace(ws: Workspace, notify: Notify = _noop,
 
     Progress is reported through `notify`."""
     if not ws.exists():
-        create_workspace_files(ws, profile().default_image)
+        create_workspace_files(ws)
         notify(f"created workspace '{ws.name}'")
 
     meta = ImageEnv.load()
@@ -460,11 +459,10 @@ def start_workspace(ws: Workspace, notify: Notify = _noop,
     ensure_token(ws)
 
     # ---- proxy ----
-    image_tag = profile().image_tag
-    image_id = docker.inspect(image_tag, "{{.Id}}")
+    image_id = docker.inspect(IMAGE_TAG, "{{.Id}}")
     if image_id is None:
         raise ImageError(
-            f"image {image_tag} not found; run `credproxy dev build` first"
+            f"image {IMAGE_TAG} not found; run `credproxy dev build` first"
         )
 
     proxy_fresh = False  # created or started this call -> tmpfs config is empty

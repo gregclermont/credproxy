@@ -13,7 +13,7 @@ Surfaces (chosen purely by invocation, never by terminal sniffing):
 `--json` is orthogonal to the surface: it selects the renderer only.
 
 Grammar (canonical):
-    credproxy workspace create NAME [--image IMG]
+    credproxy workspace create NAME
     credproxy workspace use NAME
     credproxy workspace list [FILTER]
     credproxy list [FILTER]                       # canonical survey
@@ -41,10 +41,10 @@ from ..core import workspace as core_workspace
 from ..core.errors import CredproxyError
 from ..core.workspace import RESERVED_NAMES, Workspace, for_name
 from ..core.paths import (
+    IMAGE_TAG,
     PROXY_DIR,
     TESTS_DIR,
 )
-from ..core.profile import profile
 from . import render
 from .render import fail, say
 
@@ -120,9 +120,9 @@ def _require_exists(ws: Workspace) -> None:
 # ---- workspace commands ------------------------------------------------------
 
 
-def do_create(ctx: Ctx, name: str, image: str) -> None:
+def do_create(ctx: Ctx, name: str) -> None:
     ws = for_name(name)  # always explicit; reserved-name check happens here
-    lifecycle.create_workspace_files(ws, image)
+    lifecycle.create_workspace_files(ws)
     render.OUT.created(ws.name, str(ws.config_path))
     # Loose convenience: seed the default-workspace pointer when it is unset,
     # so `credp enter` works immediately without a separate `use`. Only fills a
@@ -679,7 +679,7 @@ def do_dev_build(ctx: Ctx) -> None:
     if not PROXY_DIR.is_dir():
         fail(f"{PROXY_DIR} not found -- `dev` commands need the repo checkout")
 
-    core_docker.docker(["build", "-t", profile().image_tag, str(PROXY_DIR)], stream=True)
+    core_docker.docker(["build", "-t", IMAGE_TAG, str(PROXY_DIR)], stream=True)
 
 
 def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False, proxy_only: bool = False) -> None:
@@ -734,7 +734,7 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False, proxy_onl
         "-v", f"{REPO_ROOT / 'cli'}:/opt/cli:ro",
         "-w", "/opt",
         "--entrypoint", "python",
-        profile().image_tag,
+        IMAGE_TAG,
         "-m", "pytest", "-v", "tests/", "--ignore=tests/cli",
     ]
     cmd += trailing
@@ -851,7 +851,7 @@ _STRICT_HELP = (
     "confirmation gate on destructive actions -- run `credp --help` for that.\n"
     "\n"
     "Workspaces:\n"
-    "  credproxy workspace create NAME [--image IMG]\n"
+    "  credproxy workspace create NAME\n"
     "  credproxy workspace use NAME\n"
     "  credproxy workspace list [FILTER]   (or: credproxy list [FILTER])\n"
     "  credproxy current                   (print the default workspace)\n"
@@ -880,7 +880,7 @@ _LOOSE_HELP = (
     "Workspaces (omit NAME to act on the default):\n"
     "  credp use NAME                  set the default workspace\n"
     "  credp current                   print the default workspace\n"
-    "  credp create NAME [--image IMG] (becomes the default if none is set yet)\n"
+    "  credp create NAME (becomes the default if none is set yet)\n"
     "  credp list [FILTER]\n"
     "  credp enter|edit|start|stop|recreate|delete|apply|inspect|logs [NAME]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
@@ -938,17 +938,12 @@ _BINDING_TEST_HELP = (
     "                                bound (no workspace needed).\n"
 )
 
-def _create_help() -> str:
-    # A function (not a module constant) so the distribution's default image is
-    # read at call time -- respecting a profile overlay / CREDPROXY_PROFILE_DIR.
-    return (
-        "credproxy workspace create NAME [--image IMG] -- scaffold a workspace\n"
-        "config file and auth token. Does not start anything.\n"
-        "\n"
-        "  NAME         the workspace name (required).\n"
-        "  --image IMG  workspace container image (default: "
-        f"{profile().default_image}).\n"
-    )
+_CREATE_HELP = (
+    "credproxy workspace create NAME -- scaffold a workspace config file and\n"
+    "auth token (does not start anything). The scaffold sets a concrete image;\n"
+    "edit the generated <name>.toml to change it (its comments show what to\n"
+    "adjust), or override the template in a profile overlay (see docs/forking.md).\n"
+)
 
 
 def _wants_help(argv: list[str]) -> bool:
@@ -1112,10 +1107,10 @@ def _dispatch_workspace(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:
 
     if head == "create":
         if _wants_help(rest):
-            say(_create_help())
+            say(_CREATE_HELP)
             return
         a = _parse_create(rest[1:])
-        do_create(ctx, a.name, a.image)
+        do_create(ctx, a.name)
         return
     if head == "use":
         if len(rest) != 2:
@@ -1183,7 +1178,6 @@ def _run_ws_verb(
 def _parse_create(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="credproxy workspace create", add_help=False)
     p.add_argument("name")
-    p.add_argument("--image", default=profile().default_image)
     return p.parse_args(argv)
 
 
@@ -1208,10 +1202,10 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
         return
     if head == "create":
         if _wants_help(rest):
-            say(_create_help())
+            say(_CREATE_HELP)
             return
         a = _parse_create(rest)
-        do_create(ctx, a.name, a.image)
+        do_create(ctx, a.name)
         return
     if head == "list":
         do_list(ctx, rest[0] if rest else None)
@@ -1471,7 +1465,7 @@ def _compile_script_in_image(source: str) -> str | None:
         # otherwise the baked image's runtime is the contract.
         if PROXY_DIR.is_dir():
             cmd += ["-v", f"{PROXY_DIR}:/opt/proxy:ro"]
-        cmd += ["-w", "/opt/proxy", "--entrypoint", "python", profile().image_tag,
+        cmd += ["-w", "/opt/proxy", "--entrypoint", "python", IMAGE_TAG,
                 "-c", pycode]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True)
@@ -1481,7 +1475,7 @@ def _compile_script_in_image(source: str) -> str | None:
     if r.returncode == 0:
         return None
     if "Unable to find image" in out or "No such image" in out:
-        fail(f"proxy image '{profile().image_tag}' not found; build it with "
+        fail(f"proxy image '{IMAGE_TAG}' not found; build it with "
              f"`credproxy dev build`")
     return out or f"compile failed (exit {r.returncode})"
 

@@ -20,8 +20,8 @@ builtin          cli/credproxy_cli/builtin/   upstream defaults (in-package)
 
 A same-named file in a higher tier **shadows** the lower one; a new name **adds**
 to the set. This is `paths.layered_dirs()` for the registries (injectors,
-providers, scripts, presets) and `paths.resolve_singleton()` for the two
-singletons (`profile.toml`, `workspace.template.toml`).
+providers, scripts, presets) and `paths.resolve_singleton()` for the one
+singleton, `workspace.template.toml`.
 
 ## Two ways to customize
 
@@ -40,16 +40,14 @@ track upstream credproxy unmodified.
 ### 2. Fork the repo
 
 Commit your customizations under `profile/` (which upstream ships empty except a
-README and `*.example` files). Your **entire diff against upstream lives in
-`profile/`**, and upstream never writes there, so `git merge upstream/main` is
-conflict-free in perpetuity. The engine and builtin defaults you inherit; your
-overlay you own.
+README). Your **entire diff against upstream lives in `profile/`**, and upstream
+never writes there, so `git merge upstream/main` is conflict-free in perpetuity.
+The engine and builtin defaults you inherit; your overlay you own.
 
 ## What you can put in the overlay
 
 ```
 <profile>/
-  profile.toml                 # distribution constants (override a subset)
   workspace.template.toml      # the scaffold a fresh `create` produces
   injectors/<name>.toml        # request-shaping schemes
   providers/<name>             # secret-source executables
@@ -57,28 +55,18 @@ overlay you own.
   presets/<name>.toml          # coordinated multi-binding sets
 ```
 
-### `profile.toml` — distribution constants
-
-Override any subset; unset keys fall back to builtin
-(`cli/credproxy_cli/builtin/profile.toml`):
-
-| Key | What |
-|---|---|
-| `default_image` | image for `create` with no `--image` |
-| `image_tag` | proxy image tag the CLI builds/runs |
-| `default_user` / `default_home` / `default_uid` | the default image's baked non-root user, wired active in the scaffold |
-| `generic_home` | fallback `home` for a custom image |
-| `default_setup` | setup commands written active for `default_image` |
+> The proxy image tag and the `home` fallback are fixed engine constants (not
+> customizable for now), and there is **no default *workspace* image knob** — the
+> default workspace image is simply the `image` line in `workspace.template.toml`.
 
 ### `workspace.template.toml` — the scaffold
 
 The `<name>.toml` body a fresh `credproxy create` writes. Make it your canonical
-default workspace — your image, your `setup`, even default `[[binding]]` blocks
-for org infrastructure. It's rendered with `str.format`, so use the placeholders
-`{name}` / `{image}` (and optionally `{home_line}` / `{user_line}` /
-`{map_line}` / `{user_uid_line}` / `{setup_block}`, which credproxy fills
-active-vs-commented based on whether the workspace uses your `default_image`).
-**Double any literal braces** (`{{ ... }}`).
+default workspace — your image, your `user`/`home`, your `setup`, even default
+`[[binding]]` blocks for org infrastructure. It's a **literal** workspace config:
+credproxy substitutes only `{name}` (used in the header comment), so **double any
+other literal braces** (`{{ ... }}`). To run a different image, edit `image` (and
+`user`/`home` to match) here, or per workspace in the generated `<name>.toml`.
 
 ### Registries — injectors / providers / scripts / presets
 

@@ -87,11 +87,11 @@ $XDG_CONFIG_HOME/credproxy/                      # default ~/.config/credproxy/
   presets/<name>.toml                             # user preset registry
 
 <repo>/profile/  (or $CREDPROXY_PROFILE_DIR)      # org overlay (tier 2), upstream-empty
-  profile.toml  workspace.template.toml           # singleton overrides
+  workspace.template.toml                         # scaffold override
   injectors/ providers/ scripts/ presets/         # registry overrides/additions
 
 cli/credproxy_cli/builtin/                        # upstream defaults (tier 3)
-  profile.toml  workspace.template.toml           # distribution constants + scaffold
+  workspace.template.toml                         # the scaffold `create` stamps
   injectors/ providers/ scripts/ presets/         # builtin definitions
 
 $XDG_STATE_HOME/credproxy/                        # default ~/.local/state/credproxy/
@@ -104,7 +104,7 @@ $XDG_STATE_HOME/credproxy/                        # default ~/.local/state/credp
     sessions/<pid>                                # pidfiles for auto-stop tracking
 ```
 
-**Three-tier resolution (the fork/customization seam).** Every customizable asset resolves through one ordered search path, most specific first: **user** (`$XDG_CONFIG_HOME/credproxy/`, per-machine) → **profile** (the org overlay: `$CREDPROXY_PROFILE_DIR` or `<repo>/profile/`) → **builtin** (upstream defaults in `cli/credproxy_cli/builtin/`). A same-named file in a higher tier shadows the lower; a new name adds. This is `paths.layered_dirs()` for the registries (injectors, providers, scripts, presets) and `paths.resolve_singleton()` for the two singletons (`profile.toml` = distribution constants — default image, image tag, default user/home/uid, default setup — loaded by `core/profile.py`; `workspace.template.toml` = the scaffold `create` writes). The profile overlay is how an org customizes credproxy **without editing engine code or maintaining a conflicting fork** — upstream ships `profile/` empty, so a fork only ever adds files there (its whole diff lives in `profile/`) and `CREDPROXY_PROFILE_DIR` gives a no-fork path. **Don't reintroduce hardcoded distribution constants or a code-only template/preset** — they belong in `builtin/*.toml`, overridable by the overlay. See `docs/forking.md`.
+**Three-tier resolution (the fork/customization seam).** Every customizable asset resolves through one ordered search path, most specific first: **user** (`$XDG_CONFIG_HOME/credproxy/`, per-machine) → **profile** (the org overlay: `$CREDPROXY_PROFILE_DIR` or `<repo>/profile/`) → **builtin** (upstream defaults in `cli/credproxy_cli/builtin/`). A same-named file in a higher tier shadows the lower; a new name adds. This is `paths.layered_dirs()` for the registries (injectors, providers, scripts, presets) and `paths.resolve_singleton()` for the one singleton, `workspace.template.toml` — a **literal** workspace config the scaffold stamps (only `{name}` substituted). The default *workspace* image is therefore just the `image` line in that template (no separate knob); `image` is mandatory in `load_config` (no built-in default — the scaffold always writes one). The *proxy* image tag and the `home` fallback are plain engine constants in `paths.py` (`IMAGE_TAG`, `DEFAULT_HOME`), deliberately **not** customizable for now. The profile overlay lets an org customize the scaffold + definitions **without editing engine code or maintaining a conflicting fork** — upstream ships `profile/` empty, so a fork only ever adds files there (its whole diff lives in `profile/`) and `CREDPROXY_PROFILE_DIR` gives a no-fork path. See `docs/forking.md`.
 
 ## Commands
 
@@ -117,7 +117,7 @@ Two entry points:
 
 **Workspace commands (canonical):**
 
-- `credproxy workspace create NAME [--image IMG]` — scaffold `<name>.toml` + `auth.token`. Does not start anything. On the loose surface only, if no default workspace is set yet, the new one becomes the default (announced); it never overrides an existing default.
+- `credproxy workspace create NAME` — scaffold `<name>.toml` + `auth.token`. Does not start anything. The scaffold sets a concrete `image` (the builtin/overlay `workspace.template.toml`); to use a different image, edit the generated file. On the loose surface only, if no default workspace is set yet, the new one becomes the default (announced); it never overrides an existing default.
 - `credproxy workspace use NAME` — set the default workspace pointer (loose surface only).
 - `credproxy current` — print the default workspace pointer (`{"default": ...}` under `--json`); the read-only companion to `use`.
 - `credproxy workspace list [FILTER]` (or `credproxy list`) — workspaces with running status and image; current default marked.
@@ -150,7 +150,7 @@ Two entry points:
 
 **Loose aliases** (loose surface / `credp` only):
 
-`credp enter [NAME]`, `credp start [NAME]`, `credp stop [NAME]`, `credp recreate [NAME] [--proxy] [--reset-home]`, `credp delete [NAME]`, `credp apply [NAME]`, `credp inspect [NAME]`, `credp config [NAME] [--declared]`, `credp logs [NAME]`, `credp use NAME`, `credp create NAME [--image IMG]`, `credp list [FILTER]`, `credp binding {add|remove|list|test} ...` — all resolve to the canonical workspace command with the current default as the implicit workspace. An explicit NAME overrides the default.
+`credp enter [NAME]`, `credp start [NAME]`, `credp stop [NAME]`, `credp recreate [NAME] [--proxy] [--reset-home]`, `credp delete [NAME]`, `credp apply [NAME]`, `credp inspect [NAME]`, `credp config [NAME] [--declared]`, `credp logs [NAME]`, `credp use NAME`, `credp create NAME`, `credp list [FILTER]`, `credp binding {add|remove|list|test} ...` — all resolve to the canonical workspace command with the current default as the implicit workspace. An explicit NAME overrides the default.
 
 **Harness commands** — `credproxy dev ...`, for hacking on credproxy itself; need the repo checkout:
 
@@ -168,3 +168,5 @@ Surface these rather than picking silently if your work touches one:
 - **Per-request vs. per-host injection.** Currently strictly per-host; no path/method matching. Host *scoping* does support glob patterns (`*.amazonaws.com`) as of the hostmatch work, but matching is still hostname-only — no path, method, or query matching, and a pattern can't be enumerated to a fixed SNI set (so the intercept decision is the `creds.intercepts(sni)` predicate, not membership on `intercept_hosts()`).
 - **Proxy CA persistence across recreate.** mitmproxy's CA is regenerated on a proxy *recreate* (not on stop/start or a crash — those keep the same container). Currently a re-bootstrap cost, not silent breakage: a proxy recreate is coupled to a workspace recreate, and the workspace's CA trust lives only in its writable layer, so the workspace re-bootstraps anyway. Would become a real gap only if CA trust were made durable across workspace recreates.
 - **`/llms.txt` format.** Currently free-form prose; structured/AGENTS.md-style alternatives haven't been evaluated.
+- **Persistent home volume should become optional (deferred).** Today every workspace gets a managed home volume seeded from the image (the `home` mount); a future option would let a workspace opt out of the persistent volume (ephemeral home, or bind-mounted home). Not implemented — flagged so the assumption isn't treated as load-bearing.
+- **Distribution constants not customizable (by choice, for now).** The proxy image tag (`IMAGE_TAG`) and the `home` fallback (`DEFAULT_HOME`) are hardcoded engine constants; the default *workspace* image lives only in `workspace.template.toml`. A profile overlay can customize the scaffold + definitions but not these engine constants. If per-distribution proxy-image rebranding is wanted later, the clean path is a `proxy_image` workspace field (`ImageEnv.load(image)` already takes one) rather than reviving a `profile.toml`.

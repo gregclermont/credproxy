@@ -62,7 +62,7 @@ def test_create_help_exits_zero_with_text(xdg):
     code, out, err = _run(["workspace", "create", "--help"])
     assert code == 0
     blob = out + err
-    assert "workspace create NAME" in blob and "--image" in blob
+    assert "workspace create NAME" in blob
 
 
 def test_binding_add_help_describes_flags(xdg):
@@ -207,7 +207,7 @@ def test_template_uses_real_injector_and_verb_order(ws_factory):
     """The template must not present the `github` PRESET as an injector, and
     must use the canonical `workspace NAME start` verb order."""
     from credproxy_cli.core.config import render_template
-    rendered = render_template("demo", "python:3.12-slim")
+    rendered = render_template("demo")
     assert 'injector = "github"' not in rendered
     assert 'injector = "bearer"' in rendered
     assert "credproxy workspace demo start" in rendered

@@ -1,21 +1,28 @@
 # credproxy workspace config.
 # Edit this file, then run `credproxy workspace {name} start` to apply.
 
-# Workspace image. Changing this (or mounts/env/setup) recreates the
-# workspace container on the next `start`.
-image = "{image}"
+# Workspace image (required). Changing this (or mounts/env/setup) recreates the
+# workspace container on the next `start`. The default is a devcontainers base
+# that ships a non-root sudo user (vscode, uid 1000) + curl + ca-certificates,
+# so the bootstrap and a non-root shell work with no extra setup.
+#
+# USING A DIFFERENT IMAGE? Change `image` below, then adjust to match it: set
+# `user`/`home`/`user_uid` to a user that exists in your image (or create one in
+# `setup`, which runs as root), or comment them out to run as the image's default
+# user; comment out `map_host_user` unless that user should own your bind mounts.
+image = "mcr.microsoft.com/devcontainers/base:ubuntu"
 
 # Where the persistent home volume mounts inside the workspace. Point this at
 # the `user` below so their home is the persistent volume (the default image
 # pre-creates /home/vscode owned by vscode, so it seeds correctly -- no chown).
-{home_line}
+home = "/home/vscode"
 
 # User that `enter` runs as (docker exec -u). The user must exist in the
 # image -- built in (the default image ships `vscode`, uid 1000, with
 # passwordless sudo), or created by `setup` (which always runs as root, so it
 # can `useradd` + chown the home volume). Exec-only: changing it never
 # recreates the container, and `enter --user NAME` overrides it per session.
-{user_line}
+user = "vscode"
 
 # Make the non-root `user` above own your bind mounts, without changing
 # ownership on the host. credproxy picks the runtime-appropriate lever:
@@ -24,14 +31,14 @@ image = "{image}"
 # $CREDPROXY_HOST_UID in `setup`). Requires `user`. Recreates the container on
 # change. A --userns in run_flags overrides this (run_flags is the escape hatch
 # and wins), so you can hand-tune the mapping without unsetting it.
-{map_line}
+map_host_user = true
 
 # The in-container uid of `user` -- the side map_host_user's keep-id maps your
 # host uid onto, so it's what `user` must be for the mapping to line up. Host
 # uid and this need not be equal. Defaults to your host uid (right for a user
 # made as $CREDPROXY_HOST_UID in `setup`); set it to a baked user's uid (the
 # default image's `vscode` is 1000). Recreates the container on change.
-{user_uid_line}
+user_uid = 1000
 
 # Command `enter` runs when you don't pass `-- CMD` (argv list). Defaults to a
 # login shell, `["bash", "-l"]` -- entering the workspace is like logging in, so
@@ -70,7 +77,12 @@ image = "{image}"
 # Extra environment variables injected into the workspace container.
 # env = {{ GH_DEBUG = "1" }}
 
-{setup_block}
+# Commands run as root on each (re)created container; make them idempotent. The
+# default installs the proxy CA so HTTPS interception works immediately; add
+# your own (e.g. "npm ci") to the list.
+setup = [
+  "curl -fsSL http://proxy.local/bootstrap.sh | sh",
+]
 
 # Automatically stop the workspace when the last `enter` session exits.
 # Off by default. Changing this mid-session takes effect immediately (live

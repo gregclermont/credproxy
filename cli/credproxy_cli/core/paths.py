@@ -97,12 +97,7 @@ def builtin_presets_dir() -> Path:
     return BUILTIN_DIR / "presets"
 
 
-# Singleton distribution assets (one file each; profile overrides builtin).
-def builtin_profile_file() -> Path:
-    """Built-in distribution constants (default image, image tag, user/home)."""
-    return BUILTIN_DIR / "profile.toml"
-
-
+# Singleton distribution assets (one file; the profile overlay overrides it).
 def builtin_workspace_template_file() -> Path:
     """Built-in workspace scaffold frame."""
     return BUILTIN_DIR / "workspace.template.toml"
@@ -144,8 +139,12 @@ def workspaces_state_dir() -> Path:
     return state_dir() / "workspaces"
 
 
-# CLI-only conventions. The distribution-customizable defaults (image tag,
-# default workspace image, the default image's user/home/uid, generic home,
-# default setup) moved to the distribution profile -- see profile.py and
-# builtin/profile.toml, overridable by a fork via the profile overlay.
+# CLI-only conventions.
+IMAGE_TAG = "credproxy:dev"          # the proxy image the CLI builds/runs
 DEFAULT_WORKSPACE = "default"
+# Fallback home (mount target) when a workspace omits `home`. The workspace
+# *image* is mandatory (no default) -- the scaffold writes a concrete one, and
+# `load_config` errors if it's missing -- so the default workspace image lives in
+# exactly one visible place: builtin/workspace.template.toml (overridable by the
+# profile overlay). The home target, by contrast, has a sensible universal.
+DEFAULT_HOME = "/root"
