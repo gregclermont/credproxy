@@ -34,9 +34,19 @@ class HostnameLogger:
         self._state = state
 
     def tls_clienthello(self, data: tls.ClientHelloData) -> None:
-        creds = self._state.creds
         sni = data.client_hello.sni
-        if creds.intercepts(sni):
+        # The earliest, highest-blast-radius hook: it runs user-influenced glob
+        # regexes (creds.intercepts). It must NEVER take the flow down -- an
+        # unhandled error here would break ALL TLS. On any failure, fail SAFE to
+        # passthrough (don't TLS-terminate a connection we couldn't classify).
+        try:
+            intercept = self._state.creds.intercepts(sni)
+        except Exception as e:
+            print(f"[sni] {sni or '<no-sni>'} intercept decision failed: {e}; "
+                  f"passthrough", flush=True)
+            data.ignore_connection = True
+            return
+        if intercept:
             print(f"[sni] {sni} (intercept)", flush=True)
             return
         print(f"[sni] {sni or '<no-sni>'} (passthrough)", flush=True)

@@ -81,6 +81,19 @@ def test_clienthello_no_sni_passthrough():
     assert data.ignore_connection is True
 
 
+def test_clienthello_fails_safe_on_intercept_error():
+    """A broken intercept decision (e.g. a pathological glob) must passthrough,
+    not raise and take ALL TLS flows down."""
+    class _Boom:
+        def intercepts(self, sni):
+            raise RuntimeError("bad pattern")
+
+    log = addon.HostnameLogger(SimpleNamespace(creds=_Boom()))
+    data = make_clienthello("api.example.com")
+    log.tls_clienthello(data)                  # must not raise
+    assert data.ignore_connection is True      # failed safe to passthrough
+
+
 # ---- request: bearer substitution ----
 
 def test_request_substitutes_placeholder():
