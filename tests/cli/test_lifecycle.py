@@ -530,6 +530,42 @@ def test_drift_in_sync(xdg, workspaces_dir):
     assert report.changes == ()
 
 
+# ---- _compute_drift: unknown applied state (running) is NOT in sync ----------
+
+
+_CFG = {"image": "x", "home": "/root", "mounts": [], "env": {}, "setup": []}
+
+
+def test_drift_unknown_applied_bindings_when_running_is_drift(xdg, workspaces_dir):
+    """A running workspace with configured bindings but no applied-bindings
+    record (deleted/corrupt/legacy) can't be confirmed in sync -> drift, so
+    apply re-pushes instead of silently skipping."""
+    from credproxy_cli.core.lifecycle import _compute_drift
+    ws = _write_ws(workspaces_dir, "uk1")
+    _write_applied_spec(ws)                       # spec known; bindings absent
+    report = _compute_drift(ws, _CFG, [_make_binding_summary("b")], running=True)
+    assert not report.in_sync
+    assert any(c.kind == "bindings" for c in report.changes)
+
+
+def test_drift_unknown_applied_spec_when_running_is_drift(xdg, workspaces_dir):
+    from credproxy_cli.core.lifecycle import _compute_drift
+    ws = _write_ws(workspaces_dir, "uk2")
+    _write_applied_bindings(ws, [])               # bindings known; spec absent
+    report = _compute_drift(ws, _CFG, [], running=True)
+    assert not report.in_sync
+    assert any(c.kind == "container" and "unknown" in c.item for c in report.changes)
+
+
+def test_drift_unknown_state_not_running_is_in_sync(xdg, workspaces_dir):
+    """Not running with no applied record is just "never started" -- no drift,
+    even with configured bindings."""
+    from credproxy_cli.core.lifecycle import _compute_drift
+    ws = _write_ws(workspaces_dir, "uk3")
+    report = _compute_drift(ws, _CFG, [_make_binding_summary("b")], running=False)
+    assert report.in_sync is True
+
+
 # ---- _compute_drift: bindings drift ------------------------------------------
 
 
@@ -699,6 +735,55 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     assert len(pushed) == 1
     assert any("bindings" in a for a in result.applied)
     assert result.deferred == ()
+
+
+def test_apply_pushes_when_applied_bindings_record_absent(xdg, workspaces_dir, monkeypatch):
+    """A missing applied-bindings record (deleted/corrupt) must trigger a re-push,
+    not be treated as 'in sync' and skipped."""
+    from credproxy_cli.core.lifecycle import apply_config
+    from credproxy_cli.core.bindings import Binding
+
+    ws = _write_ws(workspaces_dir, "appx", """\
+image = "x"
+
+[[binding]]
+name = "myb"
+injector = "github"
+provider = "env"
+secret = "TOK"
+hosts = ["api.github.com"]
+placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+""")
+    ws.ensure_state_dir()
+    _write_applied_spec(ws)              # spec known; applied-bindings ABSENT
+
+    monkeypatch.setattr("credproxy_cli.core.lifecycle.docker.container_status",
+                        lambda name: "running")
+    monkeypatch.setattr("credproxy_cli.core.lifecycle.docker.resolve_host_port",
+                        lambda container, port: 39998)
+    monkeypatch.setattr(
+        "credproxy_cli.core.lifecycle.ImageEnv.load",
+        classmethod(lambda cls: type("FakeEnv", (), {
+            "http_port": 39998, "tmpfs": "/run/secrets",
+            "token": "/run/secrets-ro/auth.token", "source": "/opt/proxy",
+            "mitmproxy_uid": 31337,
+        })()),
+    )
+    pushed = []
+
+    def fake_push(ws, port, notify=None):
+        pushed.append(True)
+        return [Binding(
+            name="myb", injector="github", provider="env", secret="TOK",
+            hosts=("api.github.com",),
+            placeholder="ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            env="GITHUB_TOKEN")]
+
+    monkeypatch.setattr("credproxy_cli.core.lifecycle.push_config", fake_push)
+
+    result = apply_config(ws)
+    assert len(pushed) == 1                       # re-pushed despite no drift detail
+    assert any("bindings" in a for a in result.applied)
 
 
 def test_apply_not_running_raises(xdg, workspaces_dir, monkeypatch):

@@ -765,9 +765,15 @@ def _compute_drift(
 
     # ---- container-spec drift ----
     if applied_spec is None:
-        # No record; can't compute drift -- treated as in sync for container
-        # (the "never started" case is indicated by running=False + no record).
-        pass
+        # No (or unreadable) applied-spec record. NOT running -> just "never
+        # started", genuinely no drift. Running -> we can't confirm the container
+        # matches config, so surface it as UNKNOWN rather than silently "in sync"
+        # (a restart re-records the spec).
+        if running:
+            changes.append(DriftItem(
+                kind="container", item="spec state unknown",
+                applied=None, configured=None,
+            ))
     else:
         # Compare fields that feed the spec hash. (`home` is folded into mounts.)
         for field in ("image", "env", "setup"):
@@ -821,8 +827,15 @@ def _compute_drift(
 
     # ---- bindings drift ----
     if applied_bindings is None:
-        # No record; skip bindings drift.
-        pass
+        # No (or unreadable) applied-bindings record. Running WITH configured
+        # bindings -> we can't confirm the proxy holds them, so treat as drift so
+        # apply re-pushes (never silently assume "in sync"). Not running, or no
+        # configured bindings, is genuinely no drift.
+        if running and current_bindings:
+            changes.append(DriftItem(
+                kind="bindings", item="state unknown (re-push)",
+                applied=None, configured=None,
+            ))
     else:
         # Build lookup dicts keyed by binding name.
         applied_by_name = {b["name"]: b for b in applied_bindings}
