@@ -1134,7 +1134,9 @@ def test_recreate_reset_volume_drops_after_container(xdg, workspaces_dir,
     """--reset-volume drops the named volume -- AFTER removing the container that
     mounts it -- then starts; config still on disk (only the volume is wiped)."""
     from credproxy_cli.core import lifecycle
-    ws = _write_ws(workspaces_dir, "rc4")
+    ws = _write_ws(workspaces_dir, "rc4",
+                   'image = "x"\nhome = "/h"\n'
+                   'mounts = [{ volume = "cache", target = "/c" }]\n')
     rm_calls, started = _stub_recreate_deps(monkeypatch)
 
     lifecycle.recreate_workspace(ws, reset_volumes=["home", "cache"])
@@ -1144,6 +1146,20 @@ def test_recreate_reset_volume_drops_after_container(xdg, workspaces_dir,
                         ["volume", "rm", ws.volume("cache")]]
     assert started == ["rc4"]
     assert ws.config_path.exists()                       # workspace stays defined
+
+
+def test_recreate_reset_unknown_volume_rejected(xdg, workspaces_dir, monkeypatch):
+    """A --reset-volume name that isn't a declared managed volume (a typo) must
+    error up front, not silently preserve the real volume and report success."""
+    from credproxy_cli.core import lifecycle
+    from credproxy_cli.core.errors import ConfigError
+    ws = _write_ws(workspaces_dir, "rc5", 'image = "x"\nhome = "/h"\n')
+    rm_calls, started = _stub_recreate_deps(monkeypatch)
+
+    with pytest.raises(ConfigError, match="hmoe"):
+        lifecycle.recreate_workspace(ws, reset_volumes=["hmoe"])   # typo of "home"
+    assert rm_calls == []          # aborted BEFORE destroying anything
+    assert started == []
 
 
 # ---- typed-mount emission + generalized chown + volume lifecycle -------------

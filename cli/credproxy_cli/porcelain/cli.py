@@ -955,7 +955,6 @@ _STRICT_HELP = (
     "\n"
     "Workspaces:\n"
     "  credproxy workspace create NAME\n"
-    "  credproxy workspace use NAME\n"
     "  credproxy workspace list [FILTER]   (or: credproxy list [FILTER])\n"
     "  credproxy current                   (print the default workspace)\n"
     "  credproxy workspace NAME enter|edit|start|stop|recreate|delete|apply|inspect|logs\n"
@@ -1235,11 +1234,20 @@ def _dispatch_workspace(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:
         do_create(ctx, a.name, _create_dir(a))
         return
     if head == "use":
+        # `use` mutates the loose default-workspace pointer, so it's loose-only
+        # (strict names every workspace explicitly). `current` (read-only) stays
+        # on both surfaces.
+        if not ctx.loose:
+            fail("`workspace use` sets the loose default-workspace pointer; it is "
+                 "loose-only -- use the `credp` alias (or `credproxy --loose`). "
+                 "The strict surface names every workspace explicitly.")
         if len(rest) != 2:
-            fail("usage: credproxy workspace use NAME")
+            fail("usage: credp workspace use NAME")
         do_use(ctx, rest[1])
         return
     if head == "list":
+        if len(rest) > 2:
+            fail("usage: credproxy workspace list [FILTER]")
         do_list(ctx, rest[1] if len(rest) > 1 else None)
         return
 
@@ -1425,8 +1433,12 @@ def main(loose_default: bool = False) -> None:
 def _dispatch_meta(ctx: Ctx, head: str, rest: list[str]) -> None:
     """Top-level meta commands (no workspace argument)."""
     if head == "list":
+        if len(rest) > 1:
+            fail("usage: credproxy list [FILTER]")
         do_list(ctx, rest[0] if rest else None)
     elif head == "current":
+        if rest:
+            fail("usage: credproxy current (takes no arguments)")
         do_current(ctx)
 
 

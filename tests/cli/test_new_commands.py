@@ -117,6 +117,34 @@ def test_current_reports_pointer(xdg, workspaces_dir):
     assert json.loads(out) == {"default": "proj"}
 
 
+# ---- surface gating + arity --------------------------------------------------
+
+
+def test_workspace_use_is_loose_only(xdg, workspaces_dir):
+    """`workspace use` mutates the loose default pointer, so the strict surface
+    must reject it (it's the scriptable contract); loose accepts it."""
+    (workspaces_dir / "w.toml").write_text('image = "x"\n')
+    from credproxy_cli.core.pointer import read_default
+
+    ec, out, err = _run(["workspace", "use", "w"])          # strict
+    assert ec != 0 and "loose-only" in (out + err)
+    assert read_default() is None                            # not mutated
+
+    ec, out, err = _run(["--loose", "workspace", "use", "w"])
+    assert ec == 0
+    assert read_default() == "w"
+
+
+def test_current_rejects_extra_args(xdg, workspaces_dir):
+    ec, out, err = _run(["current", "extra"])
+    assert ec != 0 and "no arguments" in (out + err)
+
+
+def test_list_rejects_extra_args(xdg, workspaces_dir):
+    ec, out, err = _run(["list", "a", "b"])
+    assert ec != 0 and "FILTER" in (out + err)
+
+
 # ---- ad-hoc binding test -----------------------------------------------------
 
 

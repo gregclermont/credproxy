@@ -667,6 +667,21 @@ def recreate_workspace(ws: Workspace, notify: Notify = _noop,
     proxy gives it a new id -- part of the workspace's spec hash -- so
     `start_workspace` recreates the workspace alongside it regardless, and the
     workspace re-bootstraps CA trust against the proxy's regenerated CA."""
+    reset_volumes = reset_volumes or []
+    # Validate --reset-volume names against the workspace's DECLARED managed
+    # volumes UP FRONT (before destroying anything): a typo like
+    # `--reset-volume hmoe` must error loudly, not silently preserve `home` while
+    # reporting success. (A declared-but-not-yet-created volume is fine to
+    # "reset" -- the removal below tolerates a missing one.)
+    if reset_volumes:
+        cfg = load_config(ws)
+        allowed = {m["name"] for m in cfg["mounts"] if m["kind"] == "volume"}
+        unknown = sorted(v for v in reset_volumes if v not in allowed)
+        if unknown:
+            raise ConfigError(
+                f"--reset-volume: {', '.join(unknown)} not a managed volume of "
+                f"'{ws.name}' (declared: {', '.join(sorted(allowed)) or 'none'})"
+            )
     # Hold the lifecycle lock across remove-then-start so a concurrent start/enter
     # can't slip in between (and re-create the container we just removed, or race
     # the volume reset). start_workspace re-enters the same lock.
@@ -676,7 +691,7 @@ def recreate_workspace(ws: Workspace, notify: Notify = _noop,
         if include_proxy:
             notify("recreating proxy container...")
             docker.docker_quiet(["rm", "-f", ws.proxy_container])
-        for name in (reset_volumes or []):
+        for name in reset_volumes:
             # The container is already removed, so the volume is free to drop;
             # `start_workspace` re-creates it, seeded from the image.
             notify(f"resetting volume '{name}'...")
