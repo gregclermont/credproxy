@@ -663,3 +663,34 @@ def test_scaffold_sh_provider_runs_via_cli(xdg, monkeypatch):
     code, out, err = _run(["workspace", "binding", "test", "--provider", "shp",
                            "--secret", "SHX", "--injector", "bearer"])
     assert code == 0 and "value length 6" in (out + err)
+
+
+def _scaffold_sh_provider(name: str) -> Path:
+    from credproxy_cli.core.scaffold import scaffold
+    return scaffold("provider", name, "sh").path
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="sh provider needs jq")
+def test_sh_provider_ref_with_space_not_split(xdg, monkeypatch):
+    """A ref containing a space (common for op/bw/keychain item names) must be
+    treated as ONE ref, not word-split -- and multiple refs still accumulate
+    (the loop runs in the pipe subshell where it also emits)."""
+    import subprocess
+    prov = _scaffold_sh_provider("shp")
+    monkeypatch.setenv("My Token", "SPACED")
+    monkeypatch.setenv("PLAIN", "p")
+    req = json.dumps({"version": 1, "op": "get", "secrets": ["My Token", "PLAIN"]})
+    r = subprocess.run([str(prov)], input=req, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["values"] == {"My Token": "SPACED", "PLAIN": "p"}
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="sh provider needs jq")
+def test_sh_provider_missing_ref_fails_closed(xdg):
+    """A fetch failure must propagate exit 2 out of the pipe subshell (the
+    `|| exit $?` guard), so a missing secret blocks the push -- never exits 0."""
+    import subprocess
+    prov = _scaffold_sh_provider("shp")
+    req = json.dumps({"version": 1, "op": "get", "secrets": ["DEFINITELY_UNSET_XYZ"]})
+    r = subprocess.run([str(prov)], input=req, capture_output=True, text=True)
+    assert r.returncode == 2

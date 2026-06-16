@@ -65,12 +65,21 @@ case "$op" in
   describe) jq -n --arg d "$DESCRIPTION" '{description: $d}' ;;
   help)     jq -n --arg h "$HELP"        '{help: $h}' ;;
   get)
-    values='{}'
-    for ref in $(printf '%s' "$req" | jq -r '(.secrets // [])[]'); do
-      val=$(fetch "$ref") || { echo "$NAME provider: '$ref' not found" >&2; exit 2; }
-      values=$(printf '%s' "$values" | jq --arg k "$ref" --arg v "$val" '.[$k] = $v')
-    done
-    printf '%s' "$values" | jq -c '{values: .}'
+    # Stream refs NEWLINE-delimited into the loop. Do NOT use
+    # `for ref in $(...)`: unquoted command substitution word-splits a ref that
+    # contains spaces (common for `op`/`bw`/keychain item names) and pathname-
+    # expands a `*` in it. `IFS= read -r` keeps each ref whole and literal.
+    # The loop runs in the pipe's subshell, so it accumulates AND emits there;
+    # `|| exit $?` propagates a fetch failure out of the subshell.
+    printf '%s' "$req" | jq -r '(.secrets // [])[]' | {
+      values='{}'
+      while IFS= read -r ref; do
+        [ -n "$ref" ] || continue
+        val=$(fetch "$ref") || { echo "$NAME provider: '$ref' not found" >&2; exit 2; }
+        values=$(printf '%s' "$values" | jq --arg k "$ref" --arg v "$val" '.[$k] = $v')
+      done
+      printf '%s' "$values" | jq -c '{values: .}'
+    } || exit $?
     ;;
   *) echo "$NAME provider: unsupported op" >&2; exit 3 ;;
 esac
