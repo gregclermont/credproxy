@@ -98,8 +98,15 @@ def test_params_not_object():
 
 
 def test_params_value_non_string_rejected():
-    with pytest.raises(config.ConfigError, match=r"params\['header'\] must be a string"):
+    with pytest.raises(config.ConfigError, match=r"params\['header'\] must be a non-empty"):
         config.load_resolved({"bindings": [_entry(params={"header": 123})]})
+
+
+def test_params_empty_scalar_rejected():
+    """An empty scalar param (`{"header": ""}`) validates as a string but never
+    matches at request time -> silent no-inject. Reject it at load."""
+    with pytest.raises(config.ConfigError, match=r"params\['header'\] must be a non-empty"):
+        config.load_resolved({"bindings": [_entry(params={"header": ""})]})
 
 
 def test_extra_secret_slot_rejected():

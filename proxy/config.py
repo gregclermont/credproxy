@@ -376,15 +376,17 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
         params = entry.get("params", {})
         if not isinstance(params, dict):
             _fail(f"{source}: {where}.params must be an object")
-        # Param values are strings (e.g. `header`) or arrays of strings (e.g. a
-        # re-seal scheme's `api_hosts`). A wrong type would silently break
-        # injection at request time, so reject it here.
+        # Param values are NON-EMPTY strings (e.g. `header`) or arrays of
+        # non-empty strings (e.g. a re-seal scheme's `api_hosts`). A wrong type --
+        # or an empty scalar like `{"header": ""}`, which validates clean yet
+        # never matches at request time -> silent no-inject -- is rejected here.
         for pk, pv in params.items():
-            if isinstance(pv, str):
+            if isinstance(pv, str) and pv:
                 continue
             if isinstance(pv, list) and all(isinstance(x, str) and x for x in pv):
                 continue
-            _fail(f"{source}: {where}.params['{pk}'] must be a string or array of strings")
+            _fail(f"{source}: {where}.params['{pk}'] must be a non-empty string "
+                  f"or array of non-empty strings")
         # Required params: some schemes (re-seal) declare params they cannot run
         # without. For re-seal that gap is a fail-OPEN -- on_response would raise
         # and the original token-endpoint response (carrying the real minted
