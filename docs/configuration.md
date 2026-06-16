@@ -335,7 +335,15 @@ what you changed:
 - **Container settings** (`image`, `home`, `mounts`, `env`, `setup`) cannot be
   changed on a live container. `apply` reports them as **deferred** with a hint;
   `start` performs the recreate (preserving the home volume) and re-runs
-  `setup`.
+  `setup`. To force a rebuild on demand — even with no drift, e.g. to re-run
+  `setup` or get a clean container — use `recreate` (workspace container only;
+  `recreate --proxy` also rebuilds the proxy and regenerates its CA). Like
+  `start`, it preserves the home volume, config, token, and state. To *also*
+  start from a clean home, `recreate --reset-home` wipes the home volume (the
+  container's `~`, re-seeded from the image) while keeping the workspace defined
+  — config, token, and state survive, and bind-mounted host dirs are untouched.
+  It destroys data, so on the loose surface it prompts for an implicit default
+  (`--yes` bypasses).
 
 `apply` reports what it applied versus deferred; `inspect` shows the same drift
 ahead of time, item by item. `start` always re-pushes bindings once the proxy is

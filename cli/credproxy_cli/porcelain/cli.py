@@ -17,7 +17,7 @@ Grammar (canonical):
     credproxy workspace use NAME
     credproxy workspace list [FILTER]
     credproxy list [FILTER]                       # canonical survey
-    credproxy workspace NAME {enter|start|stop|delete|apply|inspect|logs}
+    credproxy workspace NAME {enter|start|stop|recreate|delete|apply|inspect|logs}
     credproxy workspace NAME binding {add|remove|list|test} ...
     credproxy injector {scaffold NAME|list}
     credproxy provider {scaffold NAME|list}
@@ -51,8 +51,8 @@ from .render import fail, say
 
 # Workspace-scoped verbs (the `workspace NAME <verb>` tail).
 _WS_VERBS = {
-    "enter", "edit", "start", "stop", "delete", "apply", "inspect", "config",
-    "logs", "binding",
+    "enter", "edit", "start", "stop", "recreate", "delete", "apply", "inspect",
+    "config", "logs", "binding",
 }
 # Workspace-level verbs that take a name as their argument, not a subject.
 _WS_NOUN_VERBS = {"create", "use", "list"}
@@ -236,6 +236,21 @@ def do_apply(ctx: Ctx, name: str | None) -> None:
     _require_exists(ws)
     result = lifecycle.apply_config(ws, notify=say)
     render.OUT.applied(ws.name, result)
+
+
+def do_recreate(ctx: Ctx, name: str | None, include_proxy: bool,
+                reset_home: bool) -> None:
+    implicit = name is None
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+    # Plain recreate keeps all persistent state, so it isn't gated. --reset-home
+    # wipes the home volume (the one recreate mode that destroys data), so it is
+    # gated like delete: confirm on an implicit default workspace (loose surface).
+    if reset_home:
+        _confirm_destructive(ctx, ws, implicit, "reset the home volume of")
+    lifecycle.recreate_workspace(ws, notify=say, include_proxy=include_proxy,
+                                 reset_home=reset_home)
+    render.OUT.recreated(ws.name, include_proxy, reset_home)
 
 
 def do_config(ctx: Ctx, name: str | None, declared: bool) -> None:
@@ -797,6 +812,15 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     sub.add_parser("edit")
     sub.add_parser("start")
     sub.add_parser("stop")
+    p_recreate = sub.add_parser("recreate")
+    # Default rebuilds only the workspace container (keeps the running proxy +
+    # its CA). `--proxy`/`--all` also recreates the proxy (full re-bootstrap).
+    p_recreate.add_argument("--proxy", "--all", dest="recreate_proxy",
+                            action="store_true")
+    # Also wipe the persistent home volume (re-seeded from the image). Destroys
+    # data, so it's gated like delete; bind-mounted host dirs are untouched.
+    p_recreate.add_argument("--reset-home", dest="recreate_reset_home",
+                            action="store_true")
     sub.add_parser("delete")
     sub.add_parser("apply")
     sub.add_parser("inspect")
@@ -831,7 +855,7 @@ _STRICT_HELP = (
     "  credproxy workspace use NAME\n"
     "  credproxy workspace list [FILTER]   (or: credproxy list [FILTER])\n"
     "  credproxy current                   (print the default workspace)\n"
-    "  credproxy workspace NAME enter|edit|start|stop|delete|apply|inspect|logs\n"
+    "  credproxy workspace NAME enter|edit|start|stop|recreate|delete|apply|inspect|logs\n"
     "  credproxy workspace NAME binding add|remove|list|test ...\n"
     "  credproxy workspace binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
@@ -858,7 +882,7 @@ _LOOSE_HELP = (
     "  credp current                   print the default workspace\n"
     "  credp create NAME [--image IMG] (becomes the default if none is set yet)\n"
     "  credp list [FILTER]\n"
-    "  credp enter|edit|start|stop|delete|apply|inspect|logs [NAME]\n"
+    "  credp enter|edit|start|stop|recreate|delete|apply|inspect|logs [NAME]\n"
     "  credp binding add|remove|list|test ...   (acts on the default workspace)\n"
     "  credp binding test --provider P --secret REF [--injector I]\n"
     "      (ad-hoc: test a definition before binding it; no workspace needed)\n"
@@ -982,6 +1006,17 @@ _VERB_HELP = {
     "stop": (
         "credproxy workspace NAME stop -- stop both containers (kept, not removed).\n"
         "Config and state survive; a later `start`/`enter` resumes."
+    ),
+    "recreate": (
+        "credproxy workspace NAME recreate [--proxy] [--reset-home] -- rebuild\n"
+        "the workspace container from a clean slate (re-runs setup), then start\n"
+        "it. Keeps the home volume, config, auth token, and state -- only the\n"
+        "container is replaced (unlike `delete`). `--proxy` (alias `--all`) also\n"
+        "recreates the proxy container, regenerating its CA (full re-bootstrap).\n"
+        "`--reset-home` ALSO wipes the home volume (the container's ~, re-seeded\n"
+        "from the image) -- bind-mounted host dirs are untouched, and config /\n"
+        "token / state survive. It destroys data, so on the loose surface it\n"
+        "prompts for an implicit default workspace (pass --yes to bypass)."
     ),
     "delete": (
         "credproxy workspace NAME delete -- remove both containers, the home\n"
@@ -1122,6 +1157,8 @@ def _run_ws_verb(
         do_delete(ctx, name)
     elif verb == "apply":
         do_apply(ctx, name)
+    elif verb == "recreate":
+        do_recreate(ctx, name, a.recreate_proxy, a.recreate_reset_home)
     elif verb == "inspect":
         do_inspect(ctx, name)
     elif verb == "config":
@@ -1153,8 +1190,8 @@ def _parse_create(argv: list[str]) -> argparse.Namespace:
 # independent behavior. They simply translate to the workspace dispatcher.
 
 _ALIAS_TO_WS_VERB = {
-    "enter", "edit", "start", "stop", "delete", "apply", "inspect", "config",
-    "logs", "binding",
+    "enter", "edit", "start", "stop", "recreate", "delete", "apply", "inspect",
+    "config", "logs", "binding",
 }
 
 

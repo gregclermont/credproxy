@@ -902,3 +902,71 @@ def test_setup_marker_and_retry(xdg, ws_factory):
     assert _setup_needed("cid1", "cid1") is False       # plain restart -> skip
     assert _setup_needed("cid1", "cid2") is True        # recreate -> re-run
     assert _setup_needed(None, "") is False             # defensive: no container
+
+
+# ---- recreate ----------------------------------------------------------------
+
+
+def _stub_recreate_deps(monkeypatch):
+    """Capture docker_quiet `rm` calls and short-circuit start_workspace, so a
+    recreate test exercises only recreate_workspace's own remove-then-start
+    logic, not the full start path."""
+    from credproxy_cli.core import lifecycle
+    rm_calls: list = []
+    monkeypatch.setattr(lifecycle.docker, "docker_quiet",
+                        lambda argv: rm_calls.append(argv))
+    started: list = []
+    monkeypatch.setattr(lifecycle, "start_workspace",
+                        lambda ws, notify=lifecycle._noop: started.append(ws.name))
+    return rm_calls, started
+
+
+def test_recreate_removes_workspace_only_then_starts(xdg, workspaces_dir, monkeypatch):
+    from credproxy_cli.core import lifecycle
+    ws = _write_ws(workspaces_dir, "rc1")
+    rm_calls, started = _stub_recreate_deps(monkeypatch)
+
+    lifecycle.recreate_workspace(ws)
+
+    assert rm_calls == [["rm", "-f", ws.ws_container]]   # proxy NOT removed
+    assert started == ["rc1"]                            # then brought back up
+
+
+def test_recreate_proxy_removes_both(xdg, workspaces_dir, monkeypatch):
+    from credproxy_cli.core import lifecycle
+    ws = _write_ws(workspaces_dir, "rc2")
+    rm_calls, started = _stub_recreate_deps(monkeypatch)
+
+    lifecycle.recreate_workspace(ws, include_proxy=True)
+
+    assert rm_calls == [["rm", "-f", ws.ws_container],
+                        ["rm", "-f", ws.proxy_container]]
+    assert started == ["rc2"]
+
+
+def test_recreate_preserves_persistent_data(xdg, workspaces_dir, monkeypatch):
+    """Default recreate never touches the home volume or config file."""
+    from credproxy_cli.core import lifecycle
+    ws = _write_ws(workspaces_dir, "rc3")
+    rm_calls, _ = _stub_recreate_deps(monkeypatch)
+
+    lifecycle.recreate_workspace(ws, include_proxy=True)
+
+    assert not any("volume" in c for c in rm_calls)      # home volume kept
+    assert ws.config_path.exists()                       # config kept
+
+
+def test_recreate_reset_home_drops_volume_after_container(xdg, workspaces_dir,
+                                                          monkeypatch):
+    """--reset-home drops the home volume -- AFTER removing the container that
+    mounts it -- then starts; config still on disk (only the volume is wiped)."""
+    from credproxy_cli.core import lifecycle
+    ws = _write_ws(workspaces_dir, "rc4")
+    rm_calls, started = _stub_recreate_deps(monkeypatch)
+
+    lifecycle.recreate_workspace(ws, reset_home=True)
+
+    assert rm_calls == [["rm", "-f", ws.ws_container],
+                        ["volume", "rm", ws.home_volume]]
+    assert started == ["rc4"]
+    assert ws.config_path.exists()                       # workspace stays defined

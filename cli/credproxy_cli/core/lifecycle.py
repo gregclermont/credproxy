@@ -547,6 +547,42 @@ def start_workspace(ws: Workspace, notify: Notify = _noop,
         _write_setup_marker(ws, container_id)
 
 
+def recreate_workspace(ws: Workspace, notify: Notify = _noop,
+                       include_proxy: bool = False,
+                       reset_home: bool = False) -> None:
+    """Force-rebuild the workspace container (and the proxy too if
+    `include_proxy`), then bring everything back up via `start_workspace`.
+
+    By default this preserves the home volume, config file, auth token, and
+    state dir -- only the container(s) are destroyed, so the persistent data
+    survives and `setup` re-runs (the rebuilt container has a fresh id). It's
+    "give me a clean container without losing my workspace".
+
+    `reset_home` additionally drops the persistent home *volume* (the container's
+    home), which `start_workspace` re-seeds from the image -- the one recreate
+    mode that destroys data, so callers gate it like `delete`. Bind-mounted host
+    dirs are a separate thing and are never touched (same promise as `delete`);
+    config/token/state still survive, so the workspace stays defined.
+
+    Removing the container(s) makes `start_workspace` see them absent and create
+    fresh ones, reusing the still-running proxy when we keep it. Recreating the
+    proxy gives it a new id -- part of the workspace's spec hash -- so
+    `start_workspace` recreates the workspace alongside it regardless, and the
+    workspace re-bootstraps CA trust against the proxy's regenerated CA."""
+    notify("recreating workspace container...")
+    docker.docker_quiet(["rm", "-f", ws.ws_container])
+    if include_proxy:
+        notify("recreating proxy container...")
+        docker.docker_quiet(["rm", "-f", ws.proxy_container])
+    if reset_home:
+        # The container is already removed, so the home volume is free to drop;
+        # `start_workspace` re-creates it, seeded from the image's home. Only the
+        # named volume -- bind-mounted host project dirs are untouched.
+        notify("resetting home volume...")
+        docker.docker_quiet(["volume", "rm", ws.home_volume])
+    start_workspace(ws, notify=notify)
+
+
 def delete_workspace(ws: Workspace) -> None:
     """Remove both containers, the home volume, the config file, and
     the state dir. Best-effort on the Docker objects (absent ones are fine)."""

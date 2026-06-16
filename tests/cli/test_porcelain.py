@@ -520,3 +520,126 @@ def test_loose_help_via_help_flag(xdg):
     ec, out, err = _run(["--loose", "--help"])
     assert ec == 0
     assert "human surface" in (out + err)
+
+
+# ---- recreate ----------------------------------------------------------------
+
+
+def _stub_recreate(monkeypatch):
+    """Replace lifecycle.recreate_workspace with a recorder of
+    (include_proxy, reset_home)."""
+    calls: list = []
+    monkeypatch.setattr(
+        "credproxy_cli.porcelain.cli.lifecycle.recreate_workspace",
+        lambda ws, notify=None, include_proxy=False, reset_home=False:
+            calls.append((include_proxy, reset_home)),
+    )
+    return calls
+
+
+def test_recreate_strict_requires_name(xdg, workspaces_dir):
+    """Strict surface: `workspace recreate` without a name fails (no default)."""
+    ec, out, err = _run(["workspace", "recreate"])
+    assert ec != 0
+
+
+def test_recreate_default_is_workspace_only(xdg, workspaces_dir, monkeypatch):
+    (workspaces_dir / "rc.toml").write_text('image = "x"\n')
+    calls = _stub_recreate(monkeypatch)
+    ec, out, err = _run(["workspace", "rc", "recreate"])
+    assert ec == 0, err
+    assert calls == [(False, False)]                     # proxy + home untouched
+
+
+def test_recreate_proxy_flag_includes_proxy(xdg, workspaces_dir, monkeypatch):
+    (workspaces_dir / "rc.toml").write_text('image = "x"\n')
+    calls = _stub_recreate(monkeypatch)
+    ec, out, err = _run(["workspace", "rc", "recreate", "--proxy"])
+    assert ec == 0, err
+    assert calls == [(True, False)]
+
+
+def test_recreate_all_is_alias_for_proxy(xdg, workspaces_dir, monkeypatch):
+    (workspaces_dir / "rc.toml").write_text('image = "x"\n')
+    calls = _stub_recreate(monkeypatch)
+    ec, out, err = _run(["workspace", "rc", "recreate", "--all"])
+    assert ec == 0, err
+    assert calls == [(True, False)]
+
+
+def test_recreate_loose_alias_resolves_default(xdg, workspaces_dir, monkeypatch):
+    """`credp recreate` (no name) resolves the default workspace."""
+    (workspaces_dir / "rc.toml").write_text('image = "x"\n')
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("rc"))
+    calls = _stub_recreate(monkeypatch)
+    ec, out, err = _run_loose(["recreate"])
+    assert ec == 0, err
+    assert calls == [(False, False)]
+
+
+# ---- recreate --reset-home: flag plumbing + destructive gate -----------------
+
+
+def test_recreate_reset_home_flag_passed_through(xdg, workspaces_dir, monkeypatch):
+    """Explicit target on the strict surface: --reset-home plumbs through with
+    no prompt (scriptable, like delete)."""
+    (workspaces_dir / "rc.toml").write_text('image = "x"\n')
+    calls = _stub_recreate(monkeypatch)
+    ec, out, err = _run(["workspace", "rc", "recreate", "--reset-home"])
+    assert ec == 0, err
+    assert calls == [(False, True)]
+
+
+def test_recreate_reset_home_implicit_non_tty_fails(xdg, workspaces_dir, monkeypatch):
+    """Gated like delete: --reset-home on an implicit default, no TTY/--yes,
+    fails closed and never calls through."""
+    (workspaces_dir / "rc.toml").write_text('image = "x"\n')
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("rc"))
+    calls = _stub_recreate(monkeypatch)
+    ec, out, err = _run_loose(["recreate", "--reset-home"])
+    assert ec != 0
+    assert "stdin is not a TTY" in err or "pass --yes" in err
+    assert calls == []
+
+
+def test_recreate_reset_home_implicit_yes_bypasses(xdg, workspaces_dir, monkeypatch):
+    """--yes bypasses the gate; --reset-home then proceeds."""
+    (workspaces_dir / "rc.toml").write_text('image = "x"\n')
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("rc"))
+    calls = _stub_recreate(monkeypatch)
+    ec, out, err = _run_loose(["--yes", "recreate", "--reset-home"])
+    assert ec == 0, err
+    assert calls == [(False, True)]
+
+
+def test_recreate_reset_home_implicit_tty_no_aborts(xdg, workspaces_dir, monkeypatch):
+    """TTY, answer 'n' -> aborts, no call through."""
+    (workspaces_dir / "rc.toml").write_text('image = "x"\n')
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("rc"))
+    calls = _stub_recreate(monkeypatch)
+    ec, out, err = _run_loose(["recreate", "--reset-home"],
+                              stdin_text="n\n", stdin_isatty=True)
+    assert ec != 0
+    assert "aborted" in err.lower()
+    assert calls == []
+
+
+def test_recreate_plain_implicit_not_gated(xdg, workspaces_dir, monkeypatch):
+    """Plain recreate (no --reset-home) keeps all state, so it is NOT gated even
+    on an implicit default with no TTY."""
+    (workspaces_dir / "rc.toml").write_text('image = "x"\n')
+    from credproxy_cli.core.pointer import set_default
+    from credproxy_cli.core.workspace import Workspace
+    set_default(Workspace("rc"))
+    calls = _stub_recreate(monkeypatch)
+    ec, out, err = _run_loose(["recreate"])
+    assert ec == 0, err
+    assert calls == [(False, False)]

@@ -114,6 +114,7 @@ Two entry points:
 - `credproxy workspace NAME enter [-- CMD...]` — hot path: start if needed, `docker exec` into the workspace. With no `-- CMD` it runs the config `shell` (default a login shell, `bash -l` — entering is "logging in", the ssh model); `-- CMD` runs a bare, non-login command (the ssh `host cmd` model). Tracks auto-stop sessions. The primary verb.
 - `credproxy workspace NAME start` — (re)start the proxy container, wait for `/health`, push bindings config, then (re)start the workspace container. Auto-creates if missing. Recreates a container when its spec drifts (proxy: image changed; workspace: image/home/mounts/env/setup or proxy netns peer changed, tracked via `credproxy.spec` label).
 - `credproxy workspace NAME stop` — `docker stop -t 1` both containers; kept, not removed.
+- `credproxy workspace NAME recreate [--proxy] [--reset-home]` — force-rebuild the workspace container from a clean slate (re-runs `setup`), then start it. Unlike `delete`, preserves the home volume, config, auth token, and state — only the container is replaced. Default rebuilds the **workspace container only** (keeps the running proxy + its CA, faster); `--proxy` (alias `--all`) also recreates the proxy, regenerating its CA (full re-bootstrap; the workspace re-bootstraps CA trust). `--reset-home` *also* wipes the persistent home **volume** (the container's `~`, re-seeded from the image) while keeping config/token/state — bind-mounted host project dirs are untouched (same promise as `delete`). It's the one recreate mode that destroys data, so it's gated like `delete` (confirm on an implicit default in loose mode; `--yes` bypasses). Implemented as `docker rm -f` the target(s) [+ `docker volume rm` the home] + `start` (so it reuses the health-wait, config push, and setup re-run).
 - `credproxy workspace NAME delete` — remove both containers, home volume, config file, and state dir. In loose mode, prompts when targeting the default workspace.
 - `credproxy workspace NAME apply` — best-effort reconcile: bindings drift → live re-push to the running proxy; container-spec drift (image/home/mounts/env/setup) → deferred with a restart hint. Reports what was applied vs. deferred.
 - `credproxy workspace NAME inspect` — config + running state + host port + binding summary + itemized drift against applied-spec/applied-bindings.
@@ -139,7 +140,7 @@ Two entry points:
 
 **Loose aliases** (loose surface / `credp` only):
 
-`credp enter [NAME]`, `credp start [NAME]`, `credp stop [NAME]`, `credp delete [NAME]`, `credp apply [NAME]`, `credp inspect [NAME]`, `credp config [NAME] [--declared]`, `credp logs [NAME]`, `credp use NAME`, `credp create NAME [--image IMG]`, `credp list [FILTER]`, `credp binding {add|remove|list|test} ...` — all resolve to the canonical workspace command with the current default as the implicit workspace. An explicit NAME overrides the default.
+`credp enter [NAME]`, `credp start [NAME]`, `credp stop [NAME]`, `credp recreate [NAME] [--proxy] [--reset-home]`, `credp delete [NAME]`, `credp apply [NAME]`, `credp inspect [NAME]`, `credp config [NAME] [--declared]`, `credp logs [NAME]`, `credp use NAME`, `credp create NAME [--image IMG]`, `credp list [FILTER]`, `credp binding {add|remove|list|test} ...` — all resolve to the canonical workspace command with the current default as the implicit workspace. An explicit NAME overrides the default.
 
 **Harness commands** — `credproxy dev ...`, for hacking on credproxy itself; need the repo checkout:
 
@@ -147,7 +148,7 @@ Two entry points:
 - `credproxy dev test [-- PYTEST_ARGS...]` — pytest inside the proxy image. Trailing args pass through to pytest.
 - `credproxy dev reload [NAME]` — SIGHUP the workspace's proxy; python re-execs in place, picking up edited source from the bind-mounted `proxy/`. The container, netns, iptables rules, and tmpfs all survive, so pushed config persists. A python crash takes the container down (no supervisor); recover with `credproxy workspace NAME start`.
 
-**Safety gate** (loose surface only): destructive commands that operate on an **implicit** (defaulted) workspace require confirmation. Explicit targets never prompt. `--yes` / `-y` bypasses. Fails closed without a TTY. Destructive set: `delete`, `binding remove` (both high recovery cost). `stop` is not gated (restart is cheap).
+**Safety gate** (loose surface only): destructive commands that operate on an **implicit** (defaulted) workspace require confirmation. Explicit targets never prompt. `--yes` / `-y` bypasses. Fails closed without a TTY. Destructive set: `delete`, `binding remove` (both high recovery cost), and `recreate --reset-home` (wipes the home volume). `stop` is not gated (restart is cheap), and neither is a plain `recreate` (the home volume, config, token, and state all survive — only the rebuildable container is lost); the gate is flag-conditional for `recreate`, firing only with `--reset-home`.
 
 ## Open design questions
 

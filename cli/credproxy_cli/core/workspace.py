@@ -35,8 +35,8 @@ _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*$")
 # `test_reserved_names_cover_all_cli_verbs` guards the two against drift.
 RESERVED_NAMES = frozenset({
     # workspace-level verbs (used both name-before-verb and as bare verbs)
-    "create", "use", "list", "enter", "edit", "start", "stop", "delete",
-    "apply", "inspect", "config", "logs",
+    "create", "use", "list", "enter", "edit", "start", "stop", "recreate",
+    "delete", "apply", "inspect", "config", "logs",
     # sub-noun
     "binding",
     # top-level meta commands (no workspace argument)
