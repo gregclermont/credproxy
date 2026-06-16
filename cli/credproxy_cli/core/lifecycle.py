@@ -39,7 +39,7 @@ from .config import (
 from .errors import DockerError, ImageError, ProxyError, WorkspaceError
 from .imageenv import ImageEnv
 from .workspace import Workspace, ensure_token
-from .paths import IMAGE_TAG, PROXY_DIR
+from .paths import IMAGE_TAG, PROXY_DIR, atomic_write_text
 from .proxy_http import proxy_status, push_config, wait_for_ready
 
 Notify = Callable[[str], None]
@@ -68,7 +68,7 @@ def _write_applied_spec(ws: Workspace, cfg: dict, proxy_id: str | None) -> None:
         "user_uid": cfg.get("user_uid"),
         "proxy_id": proxy_id,
     }
-    ws.applied_spec_path.write_text(json.dumps(spec, indent=2) + "\n")
+    atomic_write_text(ws.applied_spec_path, json.dumps(spec, indent=2) + "\n")
 
 
 def _write_applied_bindings(ws: Workspace, bindings) -> None:
@@ -90,7 +90,7 @@ def _write_applied_bindings(ws: Workspace, bindings) -> None:
         }
         for b in bindings
     ]
-    ws.applied_bindings_path.write_text(json.dumps(records, indent=2) + "\n")
+    atomic_write_text(ws.applied_bindings_path, json.dumps(records, indent=2) + "\n")
 
 
 def _load_applied_spec(ws: Workspace) -> dict | None:
@@ -119,7 +119,7 @@ def create_workspace_files(ws: Workspace) -> None:
             f"workspace '{ws.name}' already exists ({ws.config_path})"
         )
     ws.config_path.parent.mkdir(parents=True, exist_ok=True)
-    ws.config_path.write_text(render_template(ws.name))
+    atomic_write_text(ws.config_path, render_template(ws.name))
     ensure_token(ws)
 
 
@@ -358,7 +358,7 @@ def _read_setup_marker(ws: Workspace) -> str | None:
 
 def _write_setup_marker(ws: Workspace, container_id: str) -> None:
     ws.ensure_state_dir()
-    ws.setup_done_path.write_text(container_id + "\n")
+    atomic_write_text(ws.setup_done_path, container_id + "\n")
 
 
 def _setup_needed(marker: str | None, container_id: str) -> bool:

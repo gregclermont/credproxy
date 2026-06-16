@@ -12,7 +12,7 @@ it lives entirely in porcelain.
 from __future__ import annotations
 
 from .errors import WorkspaceError
-from .paths import state_dir
+from .paths import atomic_write_text, state_dir
 from .workspace import Workspace, for_name
 
 
@@ -35,9 +35,9 @@ def set_default(ws: Workspace) -> None:
     the workspace does not exist (the pointer must never name a phantom)."""
     if not ws.exists():
         raise WorkspaceError(f"workspace '{ws.name}' not found")
-    p = pointer_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(ws.name + "\n")
+    # Atomic: a torn write here would blank the default pointer, silently
+    # clearing the user's default workspace.
+    atomic_write_text(pointer_path(), ws.name + "\n")
 
 
 def clear_default() -> None:

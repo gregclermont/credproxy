@@ -37,6 +37,28 @@ def test_set_and_read_default(xdg, workspaces_dir):
     assert read_default() == "myws"
 
 
+def test_set_default_failure_preserves_prior_pointer(xdg, workspaces_dir, monkeypatch):
+    """A crash mid-write must NOT blank the default pointer (the write is atomic):
+    the previously-set default survives a failed `set_default`."""
+    import os
+
+    from credproxy_cli.core.pointer import read_default, set_default
+    from credproxy_cli.core.workspace import Workspace
+
+    for n in ("a", "b"):
+        (workspaces_dir / f"{n}.toml").write_text('image = "x"\n')
+    set_default(Workspace("a"))
+    assert read_default() == "a"
+
+    def boom(*_a):
+        raise OSError("simulated crash during rename")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError):
+        set_default(Workspace("b"))
+    assert read_default() == "a"          # still 'a', never blanked
+
+
 def test_set_default_nonexistent_raises(xdg, workspaces_dir):
     from credproxy_cli.core.errors import WorkspaceError
     from credproxy_cli.core.pointer import set_default

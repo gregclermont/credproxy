@@ -20,15 +20,14 @@ Generated names/placeholders are written back, not held in memory.
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Callable
 
 from . import hostmatch
 from .errors import ConfigError, CredproxyError
 from .injectors import Injector, find_injector
+from .paths import atomic_write_text as _atomic_write_text
 from .providers import fetch_many as provider_fetch_many
 from .schemes import location_key
 from .workspace import Workspace
@@ -40,15 +39,6 @@ Notify = Callable[[str], None]
 
 def _noop(_msg: str) -> None:
     pass
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write `text` to `path` via a same-dir temp file + atomic rename, so an
-    interrupted write never truncates the file. The workspace TOML is the single
-    source of truth with no in-memory backup -- a partial write would lose it."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
 
 
 @dataclass(frozen=True)

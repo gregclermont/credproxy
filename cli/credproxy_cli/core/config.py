@@ -36,7 +36,7 @@ import re
 from pathlib import Path
 
 from .errors import ConfigError
-from .paths import profile_dir, resolve_singleton
+from .paths import atomic_write_text, profile_dir, resolve_singleton
 from .workspace import Workspace
 
 import tomllib
@@ -395,9 +395,7 @@ def associate_directory(ws: Workspace, directory: str) -> None:
     """Persist the workspace's `directory` field (insert or replace) via an
     atomic write that preserves comments and ordering."""
     new = set_top_level_key(ws.config_path.read_text(), "directory", directory)
-    tmp = ws.config_path.with_name(ws.config_path.name + ".tmp")
-    tmp.write_text(new)
-    os.replace(tmp, ws.config_path)
+    atomic_write_text(ws.config_path, new)
 
 
 def workspace_spec_hash(cfg: dict, proxy_id: str | None) -> str:

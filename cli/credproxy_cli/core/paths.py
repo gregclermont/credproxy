@@ -145,3 +145,31 @@ def workspaces_state_dir() -> Path:
 # only hardcoded distribution constant left is the proxy image tag.
 IMAGE_TAG = "credproxy:dev"          # the proxy image the CLI builds/runs
 DEFAULT_WORKSPACE = "default"
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically: a same-dir temp file + os.replace, so
+    an interrupted or concurrent write never leaves a truncated/partial file --
+    the path always holds either the prior complete contents or the new complete
+    contents. The shared writer for every file that is itself a source of truth
+    or drives drift/setup state (the workspace TOML, applied-spec/-bindings,
+    setup_done, the default pointer); a torn write to any of those silently
+    corrupts state.
+
+    A new file gets the usual umask-derived mode; an overwrite preserves the
+    existing file's permissions. The temp name carries the pid so two processes
+    writing the same path don't clobber each other's temp. (Durability across
+    power loss -- fsync -- is intentionally not done here.)"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text)
+        if path.exists():
+            os.chmod(tmp, path.stat().st_mode & 0o777)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
