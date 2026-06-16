@@ -54,10 +54,14 @@ def _make_binding_summary(name="b", injector="github", provider="env",
 
 
 def _capture_docker_args(monkeypatch):
-    """Stub lifecycle.docker.docker to record the args of each run."""
+    """Stub lifecycle.docker.docker to record the args of each run. Also
+    neutralizes docker_quiet so create_ws_container's volume-labelling
+    (_ensure_managed_volumes) doesn't reach a real daemon during these tests."""
     calls = []
     monkeypatch.setattr("credproxy_cli.core.lifecycle.docker.docker",
                         lambda args, **kw: calls.append(args))
+    monkeypatch.setattr("credproxy_cli.core.lifecycle.docker.docker_quiet",
+                        lambda args: None)
     return calls
 
 
@@ -1024,20 +1028,29 @@ def test_mount_parent_dirs_skips_under_bind(xdg):
 
 
 def test_delete_removes_workspace_volumes(xdg, workspaces_dir, monkeypatch):
-    """delete enumerates the workspace's managed volumes (by prefix) and rms
-    them; --keep-volumes skips that."""
+    """delete enumerates the workspace's managed volumes by OWNER LABEL (not a
+    name prefix) and rms what docker returns; --keep-volumes skips that."""
     from credproxy_cli.core import lifecycle
     ws = _write_ws(workspaces_dir, "d1")
-    other = f"credproxy-vol-other-home"
-    listed = "\n".join([ws.volume("home"), ws.volume("cache"), other])
-    monkeypatch.setattr(lifecycle.docker, "docker_output", lambda argv: listed)
+    ls_argv: list = []
+
+    def fake_output(argv):
+        ls_argv.append(argv)
+        return "\n".join([ws.volume("home"), ws.volume("cache")])
+
+    monkeypatch.setattr(lifecycle.docker, "docker_output", fake_output)
     rm: list = []
     monkeypatch.setattr(lifecycle.docker, "docker_quiet", lambda argv: rm.append(argv))
 
     lifecycle.delete_workspace(ws)
+
+    # Enumeration uses an exact owner-label filter, not a `startswith` scan.
+    assert ls_argv == [["volume", "ls",
+                        "--filter", "label=credproxy.workspace=d1",
+                        "--format", "{{.Name}}"]]
     vol_rms = [a for a in rm if a[:2] == ["volume", "rm"]]
     assert vol_rms == [["volume", "rm", ws.volume("home")],
-                       ["volume", "rm", ws.volume("cache")]]   # NOT other workspace's
+                       ["volume", "rm", ws.volume("cache")]]
 
 
 def test_delete_keep_volumes(xdg, workspaces_dir, monkeypatch):
@@ -1050,3 +1063,53 @@ def test_delete_keep_volumes(xdg, workspaces_dir, monkeypatch):
 
     lifecycle.delete_workspace(ws, keep_volumes=True)
     assert not any(a[:2] == ["volume", "rm"] for a in rm)
+
+
+def test_managed_volumes_created_with_owner_label(xdg, ws_factory, monkeypatch):
+    """Managed volumes are pre-created with the workspace owner label (binds are
+    skipped) so delete can find them by label, not an ambiguous name prefix."""
+    from credproxy_cli.core import lifecycle
+    ws = ws_factory("a")
+    calls: list = []
+    monkeypatch.setattr(lifecycle.docker, "docker_quiet", lambda argv: calls.append(argv))
+    cfg = {"mounts": [
+        {"kind": "volume", "name": "home", "target": "/home", "readonly": False},
+        {"kind": "bind", "source": "/h", "target": "/t", "readonly": False},
+        {"kind": "volume", "name": "cache", "target": "/c", "readonly": False},
+    ]}
+    lifecycle._ensure_managed_volumes(ws, cfg)
+    assert calls == [
+        ["volume", "create", "--label", "credproxy.workspace=a",
+         "--label", "credproxy.volume=home", ws.volume("home")],
+        ["volume", "create", "--label", "credproxy.workspace=a",
+         "--label", "credproxy.volume=cache", ws.volume("cache")],
+    ]
+
+
+def test_workspace_volumes_label_isolates_name_prefix_siblings(xdg, workspaces_dir):
+    """Real docker: a workspace whose name is a prefix of another's
+    (`foo` vs `foo-bar`) must not enumerate -- and therefore delete -- the
+    other's volumes. The old name-prefix scan did; the owner label fixes it."""
+    from credproxy_cli.core import docker, lifecycle
+    from credproxy_cli.core.errors import DockerError
+    try:
+        docker.docker_output(["volume", "ls", "--format", "{{.Name}}"])
+    except (DockerError, FileNotFoundError):
+        pytest.skip("docker daemon not available")
+
+    # pid-unique names so a real workspace's volumes can never be touched.
+    base = f"h3probe{os.getpid()}"
+    foo = _write_ws(workspaces_dir, base)
+    foobar = _write_ws(workspaces_dir, f"{base}-bar")
+    cfg = {"mounts": [{"kind": "volume", "name": "home",
+                       "target": "/h", "readonly": False}]}
+    try:
+        lifecycle._ensure_managed_volumes(foo, cfg)
+        lifecycle._ensure_managed_volumes(foobar, cfg)
+        # foo's enumeration sees only foo's volume, though its NAME prefix
+        # (credproxy-vol-<base>-) also prefixes foo-bar's volume name.
+        assert lifecycle._workspace_volumes(foo) == [foo.volume("home")]
+        assert lifecycle._workspace_volumes(foobar) == [foobar.volume("home")]
+    finally:
+        docker.docker_quiet(["volume", "rm", foo.volume("home")])
+        docker.docker_quiet(["volume", "rm", foobar.volume("home")])

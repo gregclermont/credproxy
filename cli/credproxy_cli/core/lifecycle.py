@@ -303,6 +303,10 @@ def create_ws_container(
         # Share the proxy's netns so all egress is captured.
         "--network", f"container:{ws.proxy_container}",
     ]
+    # Create this workspace's managed volumes up front, LABELLED with the
+    # workspace name, so delete can enumerate them unambiguously (see
+    # _workspace_volumes). Must run before the `docker run` that mounts them.
+    _ensure_managed_volumes(ws, cfg)
     # Mounts, by kind. A managed `volume` (incl. the `home` sugar) is a named
     # Docker volume, namespaced per workspace, image-seeded on first run. `bind`
     # and `profile` (a profile-relative bind) are host binds.
@@ -556,14 +560,46 @@ def start_workspace(ws: Workspace, notify: Notify = _noop,
         _write_setup_marker(ws, container_id)
 
 
+_VOLUME_OWNER_LABEL = "credproxy.workspace"
+
+
+def _ensure_managed_volumes(ws: Workspace, cfg: dict) -> None:
+    """Create this workspace's managed volumes up front, each LABELLED with the
+    owning workspace, so they can later be enumerated unambiguously for delete.
+
+    A `docker run -v name:target` would auto-create the volume too, but unlabelled
+    -- and ownership can't be inferred from the NAME by prefix, because
+    `credproxy-vol-foo-` is also a prefix of `credproxy-vol-foo-bar-home`, so
+    deleting `foo` would catch `foo-bar`'s volumes. `docker volume create` is
+    idempotent and leaves an existing volume's data intact, so image-seeding on
+    first mount is unaffected. Best-effort: if labelling fails the run still
+    auto-creates the volume (unlabelled -> a possible orphan on delete, never a
+    cross-workspace deletion)."""
+    for m in cfg["mounts"]:
+        if m["kind"] != "volume":
+            continue
+        docker.docker_quiet([
+            "volume", "create",
+            "--label", f"{_VOLUME_OWNER_LABEL}={ws.name}",
+            "--label", f"credproxy.volume={m['name']}",
+            ws.volume(m["name"]),
+        ])
+
+
 def _workspace_volumes(ws: Workspace) -> list[str]:
-    """This workspace's managed Docker volumes (by name prefix), or [] if none /
-    docker unavailable."""
+    """This workspace's managed Docker volumes, found by the owner LABEL (exact
+    match) -- NOT a name prefix, which would also match another workspace whose
+    name extends this one (`foo` vs `foo-bar`). Returns [] if none / docker
+    unavailable."""
     try:
-        out = docker.docker_output(["volume", "ls", "--format", "{{.Name}}"])
+        out = docker.docker_output([
+            "volume", "ls",
+            "--filter", f"label={_VOLUME_OWNER_LABEL}={ws.name}",
+            "--format", "{{.Name}}",
+        ])
     except DockerError:
         return []
-    return [n for n in out.splitlines() if n.startswith(ws.volume_prefix)]
+    return [n for n in out.splitlines() if n]
 
 
 def recreate_workspace(ws: Workspace, notify: Notify = _noop,
