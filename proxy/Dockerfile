@@ -30,8 +30,13 @@ WORKDIR ${CREDPROXY_SOURCE}
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY entrypoint.sh main.py addon.py bootstrap.py \
-     admin.py config.py constants.py starlark_runtime.py ./
+# Copy every proxy module with a glob, not a hand-maintained list: a new module
+# (or one some other module imports) can't then be silently left out of the
+# image. The baked image is the audited runtime artifact -- `dev` bind-mounts
+# proxy/ over /opt/proxy for live edits, but production runs these layers, so a
+# missing module here is a boot-time crash that only the no-mount path hits.
+COPY entrypoint.sh ./
+COPY *.py ./
 RUN chmod 0755 entrypoint.sh
 
 ENTRYPOINT ["/opt/proxy/entrypoint.sh"]
