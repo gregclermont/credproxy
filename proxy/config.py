@@ -50,6 +50,7 @@ Credentials API:
   - `inward_bindings()`  -> list[InwardBinding]: least-disclosure descriptors
     for /setup (no secret values, no provider/secret-id).
 """
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -215,6 +216,11 @@ class RuntimeMinter:
     def mint(self, value: str, ttl: float | None, api_hosts, header: str = "Authorization") -> str:
         if not api_hosts:
             raise ValueError("mint requires at least one api_host (binding param 'api_hosts')")
+        # Last-line guard: a non-finite or negative TTL would register a permanent
+        # (or already-expired) runtime entry. ttl=None is the intentional
+        # never-expires case.
+        if ttl is not None and (not math.isfinite(ttl) or ttl < 0):
+            raise ValueError(f"mint ttl must be a non-negative finite number (got {ttl!r})")
         placeholder = self._generate()
         transform = Transform(
             name=f"reseal:{placeholder[:16]}",

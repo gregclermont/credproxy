@@ -34,6 +34,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 from typing import Protocol
 from urllib.parse import unquote
 
@@ -610,7 +611,11 @@ class OAuth2ResealScheme:
             return False
         expires_field = ctx.params.get("expires_field", "expires_in")
         ttl = data.get(expires_field)
-        if not isinstance(ttl, (int, float)) or isinstance(ttl, bool):
+        # A non-number, a bool, or a non-finite/negative value (JSON allows
+        # `Infinity`/`NaN`, which would mint a PERMANENT runtime entry) -> use the
+        # configured fallback TTL instead of trusting it.
+        if not isinstance(ttl, (int, float)) or isinstance(ttl, bool) \
+                or not math.isfinite(ttl) or ttl < 0:
             try:
                 ttl = int(ctx.params.get("ttl", "3600"))
             except (TypeError, ValueError):

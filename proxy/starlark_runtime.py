@@ -283,9 +283,11 @@ def _b64encode(s):
 
 
 def _b64decode(s):
-    """Base64-decode a str -> str (UTF-8). Raises on invalid input, which the
-    caller turns into a fail-closed skip."""
-    return base64.b64decode(s).decode("utf-8")
+    """Base64-decode a str -> str (UTF-8). `validate=True` so non-alphabet bytes
+    are REJECTED rather than silently ignored -- a malformed carrier (e.g. a
+    Basic blob with stray punctuation) fails closed instead of decoding to
+    something unintended."""
+    return base64.b64decode(s, validate=True).decode("utf-8")
 
 
 def _b64url_encode(s):
@@ -346,7 +348,15 @@ def _rs256_sign(private_key_pem, msg):
 #    the classic footgun (segment order, padding, signing the right bytes), so
 #    the proxy owns it. --
 def _jwt_encode_sign(header, claims, private_key_pem):
-    """Build a signed RS256 JWS compact token from header/claims dicts."""
+    """Build a signed RS256 JWS compact token from header/claims dicts. The
+    header's `alg` is FORCED to RS256 -- the only algorithm this primitive
+    implements -- so a script can't emit a header that lies about the signature
+    (the classic `alg:none`/`HS256`-confusion footgun); a header that explicitly
+    asks for a different alg is rejected."""
+    alg = header.get("alg")
+    if alg is not None and alg != "RS256":
+        raise ValueError(f"jwt_encode_sign signs RS256 only, not alg={alg!r}")
+    header = {**header, "alg": "RS256"}
     seg = (_b64url_encode(json.dumps(header, separators=(",", ":"))) + "."
            + _b64url_encode(json.dumps(claims, separators=(",", ":"))))
     return seg + "." + _rs256_sign(private_key_pem, seg)

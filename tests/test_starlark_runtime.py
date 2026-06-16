@@ -472,3 +472,36 @@ def test_leading_underscore_functions_are_not_exported():
 def test_api_version_constant():
     import starlark_runtime
     assert starlark_runtime.API_VERSION in starlark_runtime.SUPPORTED_API_VERSIONS
+
+
+# ---- primitive hardening -----------------------------------------------------
+
+def test_jwt_encode_sign_rejects_lying_alg():
+    """The primitive always RS256-signs, so a header asking for a different alg
+    (the alg:none / HS256-confusion footgun) is rejected."""
+    from starlark_runtime import _jwt_encode_sign
+    with pytest.raises(ValueError, match="RS256"):
+        _jwt_encode_sign({"alg": "none"}, {"sub": "x"}, "unused-pem")
+
+
+def test_jwt_encode_sign_forces_rs256_header():
+    import json
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    from starlark_runtime import _jwt_encode_sign
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()).decode()
+    tok = _jwt_encode_sign({"typ": "JWT"}, {"sub": "x"}, pem)   # no alg given
+    h = tok.split(".")[0]
+    hdr = json.loads(base64.urlsafe_b64decode(h + "=" * (-len(h) % 4)))
+    assert hdr["alg"] == "RS256" and hdr["typ"] == "JWT"
+
+
+def test_b64decode_rejects_non_alphabet():
+    from starlark_runtime import _b64decode
+    with pytest.raises(Exception):
+        _b64decode("ab*cd==")          # '*' isn't a base64 character

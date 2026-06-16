@@ -494,3 +494,35 @@ def test_minted_token_survives_config_repush():
     new.adopt_runtime(creds)
     [survived] = new.transforms_for("api.example.com")
     assert survived.secrets == {"value": "MINTED"}    # minted token preserved
+
+
+# ---- TTL sanity: no permanent / negative runtime entries ---------------------
+
+def test_mint_rejects_non_finite_or_negative_ttl():
+    creds = config.BindingCredentials({})
+    minter = config.RuntimeMinter(creds, placeholders.generate)
+    for bad in (float("inf"), float("nan"), -5):
+        with pytest.raises(ValueError, match="finite"):
+            minter.mint("v", bad, ["api.example.com"])
+
+
+def test_oauth2_reseal_infinite_expires_in_uses_fallback_ttl():
+    """A token response with non-finite expires_in (JSON `Infinity`) must NOT mint
+    a permanent runtime entry -- the configured fallback TTL applies, so it
+    expires."""
+    clock = [0.0]
+    creds = config.load_resolved({"bindings": [{
+        "name": "oauth", "hosts": ["oauth.example.com"], "scheme": "oauth2-reseal",
+        "params": {"api_hosts": ["api.example.com"], "ttl": "100"},
+        "secret": {"value": "CS"}, "placeholder": "cs_PH"}]})
+    creds._clock = lambda: clock[0]
+    [t] = creds.transforms_for("oauth.example.com")
+    flow = tflow.tflow(resp=True)
+    flow.response.status_code = 200
+    flow.response.text = '{"access_token": "TOK", "expires_in": Infinity}'
+    minter = config.RuntimeMinter(creds, placeholders.generate)
+    ctx = schemes.ResponseCtx(flow, t.secrets, t.params, t.placeholder, minter=minter)
+    assert t.scheme.on_response(ctx) is True
+    assert len(creds.transforms_for("api.example.com")) == 1     # minted
+    clock[0] = 101.0
+    assert creds.transforms_for("api.example.com") == []         # expired (not permanent)
