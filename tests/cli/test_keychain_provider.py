@@ -56,6 +56,21 @@ def test_keychain_multiple(fake_security):
     assert r.returncode == 2
 
 
+def test_keychain_missing_binary_exits_1(tmp_path, monkeypatch):
+    """When `security` isn't on PATH, the provider exits 1 cleanly, not a
+    traceback. (Run via the interpreter so PATH can be emptied.)"""
+    import sys
+    monkeypatch.setenv("PATH", str(tmp_path))          # no `security` on PATH
+    r = subprocess.run(
+        [sys.executable, str(_keychain())],
+        input=json.dumps({"version": 1, "op": "get", "secrets": ["good"]}),
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1
+    assert "not on PATH" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
 def test_keychain_not_found(fake_security):
     r = _run({"version": 1, "op": "get", "secrets": ["nope"]})
     assert r.returncode == 2

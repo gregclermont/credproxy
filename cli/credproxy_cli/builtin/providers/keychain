@@ -26,11 +26,18 @@ class NotFound(Exception):
     """A ref that doesn't resolve -> exit 2."""
 
 
+class Missing(Exception):
+    """The backend CLI is not installed -> exit 1 (a clean error, not a traceback)."""
+
+
 def get(ref):
-    r = subprocess.run(
-        ["security", "find-generic-password", "-s", ref, "-w"],
-        capture_output=True, text=True,
-    )
+    try:
+        r = subprocess.run(
+            ["security", "find-generic-password", "-s", ref, "-w"],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        raise Missing("`security` is not on PATH (this provider is macOS-only)")
     if r.returncode != 0:
         raise NotFound(
             f"no generic-password item with service {ref!r} "
@@ -61,11 +68,13 @@ def main():
         json.dump({"help": HELP}, sys.stdout)
     elif op == "get":
         values = {}
-        for ref in req.get("secrets") or []:
-            try:
+        try:
+            for ref in req.get("secrets") or []:
                 values[ref] = get(ref)
-            except NotFound as e:
-                _fail(str(e), 2)
+        except NotFound as e:
+            _fail(str(e), 2)
+        except Missing as e:
+            _fail(str(e), 1)
         json.dump({"values": values}, sys.stdout)
     else:
         _fail("unsupported op", 3)

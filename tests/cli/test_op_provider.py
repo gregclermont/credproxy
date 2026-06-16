@@ -54,6 +54,21 @@ def test_op_not_found(fake_op):
     assert "could not read" in r.stderr
 
 
+def test_op_missing_binary_exits_1(tmp_path, monkeypatch):
+    """When the `op` CLI isn't installed, the provider exits 1 with a clean error,
+    not a traceback. (Run via the interpreter so PATH can be emptied.)"""
+    import sys
+    monkeypatch.setenv("PATH", str(tmp_path))          # no `op` on PATH
+    r = subprocess.run(
+        [sys.executable, str(_op())],
+        input=json.dumps({"version": 1, "op": "get", "secrets": [_REF]}),
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 1
+    assert "not on PATH" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
 def test_op_unsupported_version(fake_op):
     r = _run({"version": 2, "op": "get", "secrets": []})
     assert r.returncode == 3

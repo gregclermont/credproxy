@@ -25,8 +25,15 @@ class NotFound(Exception):
     """A ref that doesn't resolve -> exit 2."""
 
 
+class Missing(Exception):
+    """The backend CLI is not installed -> exit 1 (a clean error, not a traceback)."""
+
+
 def get(ref):
-    r = subprocess.run(["op", "read", ref], capture_output=True, text=True)
+    try:
+        r = subprocess.run(["op", "read", ref], capture_output=True, text=True)
+    except FileNotFoundError:
+        raise Missing("`op` is not on PATH (install the 1Password CLI)")
     if r.returncode != 0:
         raise NotFound(f"could not read {ref!r}: {r.stderr.strip()}")
     # `op read` appends a single trailing newline; strip just that one (a field
@@ -54,11 +61,13 @@ def main():
         json.dump({"help": HELP}, sys.stdout)
     elif op == "get":
         values = {}
-        for ref in req.get("secrets") or []:
-            try:
+        try:
+            for ref in req.get("secrets") or []:
                 values[ref] = get(ref)
-            except NotFound as e:
-                _fail(str(e), 2)
+        except NotFound as e:
+            _fail(str(e), 2)
+        except Missing as e:
+            _fail(str(e), 1)
         json.dump({"values": values}, sys.stdout)
     else:
         _fail("unsupported op", 3)
