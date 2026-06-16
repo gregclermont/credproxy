@@ -948,6 +948,53 @@ def test_setup_marker_and_retry(xdg, ws_factory):
 # ---- recreate ----------------------------------------------------------------
 
 
+def test_start_proxy_image_change_removes_workspace_before_proxy(xdg, workspaces_dir,
+                                                                monkeypatch):
+    """On a proxy image change, the workspace container (which shares the proxy's
+    netns) must be removed BEFORE the proxy, and the proxy removal must be CHECKED
+    -- otherwise removing the proxy under the running workspace fails and the
+    swallowed error collides on the re-create."""
+    from credproxy_cli.core import lifecycle
+    ws = _write_ws(workspaces_dir, "imgchg")
+    ws.ensure_state_dir()
+
+    calls: list = []
+    monkeypatch.setattr(lifecycle.docker, "container_status", lambda name: "running")
+
+    def fake_inspect(target, fmt):
+        if target == lifecycle.IMAGE_TAG:
+            return "newimg"                       # current image id
+        if fmt == "{{.Image}}":
+            return "oldimg"                       # proxy's (stale) image id
+        return "x"
+
+    monkeypatch.setattr(lifecycle.docker, "inspect", fake_inspect)
+    monkeypatch.setattr(lifecycle.docker, "docker_quiet",
+                        lambda argv: calls.append(("quiet", argv)))
+    monkeypatch.setattr(lifecycle.docker, "docker",
+                        lambda argv, **kw: calls.append(("checked", argv)))
+    monkeypatch.setattr(
+        "credproxy_cli.core.lifecycle.ImageEnv.load",
+        classmethod(lambda cls: type("FakeEnv", (), {
+            "http_port": 39998, "tmpfs": "/run/secrets",
+            "token": "/run/secrets-ro/auth.token", "source": "/opt/proxy",
+            "mitmproxy_uid": 31337,
+        })()),
+    )
+    # Abort right after the proxy recreate so the rest of start need not be stubbed.
+    def boom(ws, meta):
+        raise RuntimeError("stop after proxy recreate")
+    monkeypatch.setattr(lifecycle, "create_proxy", boom)
+
+    with pytest.raises(RuntimeError, match="stop after proxy recreate"):
+        lifecycle.start_workspace(ws)
+
+    rm_ws = ("quiet", ["rm", "-f", ws.ws_container])
+    rm_proxy = ("checked", ["rm", "-f", ws.proxy_container])
+    assert rm_ws in calls and rm_proxy in calls          # proxy removal is CHECKED
+    assert calls.index(rm_ws) < calls.index(rm_proxy)    # workspace removed first
+
+
 def _stub_recreate_deps(monkeypatch):
     """Capture docker_quiet `rm` calls and short-circuit start_workspace, so a
     recreate test exercises only recreate_workspace's own remove-then-start

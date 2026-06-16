@@ -523,7 +523,15 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
             docker.inspect(ws.proxy_container, "{{.Image}}") != image_id:
         notify("proxy image changed; recreating proxy "
                "(workspace will need re-bootstrap)")
-        docker.docker_quiet(["rm", "-f", ws.proxy_container])
+        # Remove the WORKSPACE container FIRST: it shares the proxy's netns
+        # (--network container:<proxy>), and Docker refuses to remove a container
+        # whose netns a still-running container is using -- so removing the proxy
+        # while the workspace is up would fail. It's recreated below regardless
+        # (the new proxy id changes the spec hash). The proxy removal is CHECKED
+        # so a genuine failure aborts here rather than silently colliding on the
+        # re-create with a leftover container.
+        docker.docker_quiet(["rm", "-f", ws.ws_container])
+        docker.docker(["rm", "-f", ws.proxy_container])
         status = None
     if status is None:
         notify("starting proxy...")
