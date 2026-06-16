@@ -1653,9 +1653,17 @@ def _dispatch_dev(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:
     if sub == "build":
         do_dev_build(ctx)
     elif sub == "test":
-        test_args = rest[1:]  # e.g. ["--cli"] or ["--proxy"] or []
+        test_args = rest[1:]  # selection flags (pytest args go after `--`)
+        unknown = [a for a in test_args if a not in ("--cli", "--proxy")]
+        if unknown:
+            fail(f"dev test: unknown flag(s) {' '.join(unknown)} "
+                 f"(use --cli or --proxy; pytest args go after `--`)")
         cli_only = "--cli" in test_args
         proxy_only = "--proxy" in test_args
+        if cli_only and proxy_only:
+            # Both = "neither" under the old logic, yet the proxy path still ran.
+            fail("dev test: --cli and --proxy are mutually exclusive "
+                 "(omit both to run both suites)")
         do_dev_test(ctx, trailing, cli_only=cli_only, proxy_only=proxy_only)
     elif sub == "reload":
         do_dev_reload(ctx, rest[1] if len(rest) > 1 else None)

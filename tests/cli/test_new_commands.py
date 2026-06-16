@@ -145,6 +145,16 @@ def test_list_rejects_extra_args(xdg, workspaces_dir):
     assert ec != 0 and "FILTER" in (out + err)
 
 
+def test_dev_test_cli_and_proxy_mutually_exclusive(xdg):
+    ec, out, err = _run(["dev", "test", "--cli", "--proxy"])
+    assert ec != 0 and "mutually exclusive" in (out + err)
+
+
+def test_dev_test_unknown_flag_rejected(xdg):
+    ec, out, err = _run(["dev", "test", "--bogus"])
+    assert ec != 0 and "unknown flag" in (out + err)
+
+
 # ---- ad-hoc binding test -----------------------------------------------------
 
 
