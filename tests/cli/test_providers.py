@@ -694,3 +694,101 @@ def test_sh_provider_missing_ref_fails_closed(xdg):
     req = json.dumps({"version": 1, "op": "get", "secrets": ["DEFINITELY_UNSET_XYZ"]})
     r = subprocess.run([str(prov)], input=req, capture_output=True, text=True)
     assert r.returncode == 2
+
+
+# ---- terminal-state preservation around a provider exec ----------------------
+# Regression: an interactive provider (e.g. `bw`) disables tty echo via getpass
+# to read a master password; if FETCH_TIMEOUT then kills it mid-prompt, its own
+# restore never runs and the user's shell is left with input echo off. The
+# parent (fetch_many) must snapshot+restore the terminal so a killed/crashed
+# provider can't corrupt it.
+
+
+def test_preserve_tty_noop_without_tty(monkeypatch):
+    """No controlling terminal (CI / piped) -> a silent no-op, never raises."""
+    from credproxy_cli.core import providers
+
+    real_open = providers.os.open
+
+    def _no_tty(path, *a, **k):
+        if path == "/dev/tty":
+            raise OSError("no controlling terminal")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(providers.os, "open", _no_tty)
+    with providers._preserve_tty():
+        pass  # must complete without error
+
+
+def test_fetch_timeout_restores_tty(monkeypatch):
+    """On a provider timeout the tty-restore wrapper runs (enter + restore) and
+    a ProviderError is raised -- a provider killed mid-prompt can't leak its
+    echo-off state to the shell."""
+    import contextlib
+    import subprocess
+    from pathlib import Path
+
+    from credproxy_cli.core import providers
+    from credproxy_cli.core.errors import ProviderError
+
+    monkeypatch.setattr(
+        providers, "find_provider",
+        lambda n: providers.Provider(name=n, exe=Path("/bin/true"), source="user"))
+
+    def _timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="prov", timeout=providers.FETCH_TIMEOUT)
+
+    monkeypatch.setattr(providers.subprocess, "run", _timeout)
+
+    events: list[str] = []
+
+    @contextlib.contextmanager
+    def _spy():
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("restore")
+
+    monkeypatch.setattr(providers, "_preserve_tty", _spy)
+
+    with pytest.raises(ProviderError, match="timed out"):
+        providers.fetch_many("bw", ["x"])
+    assert events == ["enter", "restore"]  # restore ran despite the timeout
+
+
+def test_preserve_tty_restores_echo():
+    """With a real controlling terminal, _preserve_tty restores echo a provider
+    turned off (the bw-killed-mid-getpass scenario), even on a clean exit."""
+    import os as _os
+
+    try:
+        import termios
+    except ImportError:
+        pytest.skip("no termios on this platform")
+    try:
+        probe = _os.open("/dev/tty", _os.O_RDWR | _os.O_NOCTTY)
+    except OSError:
+        pytest.skip("no controlling terminal")
+    try:
+        before = termios.tcgetattr(probe)
+    finally:
+        _os.close(probe)
+
+    from credproxy_cli.core.providers import _preserve_tty
+
+    with _preserve_tty():
+        fd = _os.open("/dev/tty", _os.O_RDWR | _os.O_NOCTTY)
+        try:
+            attrs = termios.tcgetattr(fd)
+            attrs[3] &= ~termios.ECHO  # disable echo, exactly as getpass does
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        finally:
+            _os.close(fd)
+
+    after_fd = _os.open("/dev/tty", _os.O_RDWR | _os.O_NOCTTY)
+    try:
+        after = termios.tcgetattr(after_fd)
+    finally:
+        _os.close(after_fd)
+    assert after[3] == before[3]  # c_lflag (incl. ECHO) restored to the snapshot

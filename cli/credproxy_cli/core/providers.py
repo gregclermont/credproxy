@@ -22,6 +22,7 @@ executable `run`.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -42,6 +43,49 @@ EXIT_NOT_FOUND = 2
 EXIT_UNSUPPORTED = 3
 
 
+@contextlib.contextmanager
+def _preserve_tty():
+    """Snapshot and restore the controlling terminal around a provider exec.
+
+    An interactive provider (e.g. `bw`/`op` prompting for a master password via
+    getpass) puts /dev/tty into no-echo through termios and restores it in its
+    own `finally`. But if FETCH_TIMEOUT fires while it blocks on input,
+    subprocess kills it with SIGKILL -- its restore never runs, and the user's
+    shell is left with echo off (typed input invisible). The parent owns the
+    subprocess lifecycle, so it is the only place that can guarantee cleanup: we
+    snapshot the tty before the exec and restore it unconditionally after, so a
+    killed or crashed provider can't corrupt the terminal.
+
+    No controlling terminal (CI, piped) or no termios (non-Unix host) -> a
+    harmless no-op. TCSAFLUSH on restore discards anything the user typed blind
+    during the hang (e.g. a half-entered password), keeping it out of the shell.
+    """
+    try:
+        import termios
+    except ImportError:
+        termios = None
+    fd, saved = -1, None
+    if termios is not None:
+        try:
+            fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+            saved = termios.tcgetattr(fd)
+        except Exception:
+            saved = None  # no usable tty -> nothing to protect
+    try:
+        yield
+    finally:
+        if saved is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSAFLUSH, saved)
+            except Exception:
+                pass  # restore is best-effort; never mask the real error
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 @dataclass(frozen=True)
 class Provider:
     """A resolved provider: its name and the executable to run."""
@@ -60,11 +104,16 @@ def _ask(exe: Path, op: str, field: str) -> str | None:
     the fetch hot path."""
     req = json.dumps({"version": PROTOCOL_VERSION, "op": op})
     try:
-        proc = subprocess.run(
-            [str(exe)], input=req,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            text=True, timeout=5,
-        )
+        # _preserve_tty for the same reason as the fetch path: a provider that
+        # touches /dev/tty and is then killed by this timeout must not leave the
+        # terminal in no-echo (well-behaved metadata ops don't prompt, but a
+        # third-party provider might).
+        with _preserve_tty():
+            proc = subprocess.run(
+                [str(exe)], input=req,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, timeout=5,
+            )
     except (subprocess.TimeoutExpired, OSError):
         return None
     if proc.returncode != 0:
@@ -164,15 +213,19 @@ def fetch_many(provider_name: str, refs: list[str]) -> dict[str, str]:
     try:
         # stderr is NOT captured: it is inherited from the terminal so an
         # interactive provider can prompt. We therefore have no stderr tail
-        # to quote on failure -- diagnostics the user already saw.
-        proc = subprocess.run(
-            [str(provider.exe)],
-            input=request,
-            stdout=subprocess.PIPE,
-            text=True,
-            timeout=FETCH_TIMEOUT,
-            check=False,
-        )
+        # to quote on failure -- diagnostics the user already saw. _preserve_tty
+        # guards against a provider that disables echo to prompt and is then
+        # killed by the timeout before restoring it (would leave the shell
+        # with input echo off).
+        with _preserve_tty():
+            proc = subprocess.run(
+                [str(provider.exe)],
+                input=request,
+                stdout=subprocess.PIPE,
+                text=True,
+                timeout=FETCH_TIMEOUT,
+                check=False,
+            )
     except subprocess.TimeoutExpired:
         raise ProviderError(
             f"provider '{provider_name}' timed out after "
