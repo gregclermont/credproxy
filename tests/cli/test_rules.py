@@ -272,6 +272,25 @@ def test_match_rules_response_only_script_continues():
     assert m[1].terminal is True
 
 
+def test_match_rules_request_active_script_is_conditional(xdg):
+    # A request-active script MIGHT block at runtime; a following block is still
+    # reported (conditional), not hidden -- the dry-run can't solve the halting
+    # problem, so it stays honest.
+    from credproxy_cli.core.paths import scripts_config_dir
+    from credproxy_cli.core.rules import Rule, match_rules
+    d = scripts_config_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "rw.star").write_text("def on_request():\n    req_set_header('X', 'y')\n")
+    rules = [
+        Rule(name="rw", hosts=("api.github.com",), action="script", script="rw"),
+        Rule(name="blk", hosts=("api.github.com",), action="block"),
+    ]
+    m = match_rules(rules, "GET", "api.github.com", "/x")
+    assert [x.name for x in m] == ["rw", "blk"]         # block NOT hidden
+    assert m[0].may_terminate is True and m[0].terminal is False
+    assert m[1].terminal is True and m[1].conditional is True   # gated on rw
+
+
 def test_match_rules_path_and_host_glob():
     from credproxy_cli.core.rules import Rule, match_rules
     rules = [Rule(name="r", hosts=("sts.*.amazonaws.com",), action="block",

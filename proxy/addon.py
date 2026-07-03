@@ -111,7 +111,12 @@ class HostnameLogger:
         marks = list(rule_markers)
         if applied:
             marks.append(f"inject:{','.join(applied)}")
-        elif creds.intercepts(host):
+        elif candidates:
+            # `candidates` (bindings evaluated for this host), NOT
+            # creds.intercepts(host): a rule-only host is intercepted but has no
+            # binding to decline, so `(no-inject)` would falsely imply one was
+            # evaluated -- and the audit below keys on `candidates` too, so the
+            # marker and the event must agree.
             marks.append("no-inject")
         marker = (" (" + " ".join(marks) + ")") if marks else ""
         print(f"[http] {req.method} {host}{path}{marker}", flush=True)
@@ -297,17 +302,16 @@ class HostnameLogger:
                 # the minted placeholder is used on an API host) then correlates
                 # with this binding's `reseal` mint event below.
                 minter = RuntimeMinter(creds, placeholders.generate,
-                                       source_binding=t.name)
+                                       source_binding=t.name, source_host=host)
                 # ResponseCtx wraps the whole flow: a re-seal scheme can read the
                 # request it answered (host/path) AND read/mutate the response.
                 ctx = ResponseCtx(flow, t.secrets, t.params, t.placeholder,
                                   minter=minter)
                 try:
-                    if t.scheme.on_response(ctx):
-                        # A re-seal scheme minted a dynamic placeholder from this
-                        # token-endpoint response. Record it (names only).
-                        audit.emit("reseal", binding=t.name, scheme=t.scheme.name,
-                                   host=host, outcome="minted")
+                    # The mint audit is emitted by RuntimeMinter.mint() itself (so
+                    # a script that mints without returning True still audits), so
+                    # the return value is ignored here.
+                    t.scheme.on_response(ctx)
                 except Exception as e:
                     print(f"[scheme] {t.scheme.name} response on {host} failed: "
                           f"{e}", flush=True)

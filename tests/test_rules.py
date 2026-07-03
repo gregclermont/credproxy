@@ -364,6 +364,25 @@ def test_inward_rules_excludes_hidden():
     assert "set_headers" not in json.dumps(inward)   # no rewrite values leaked
 
 
+def test_hidden_rule_only_host_not_in_disclosed_but_intercepted():
+    # A hidden tripwire on a bindings-free host must NOT be enumerable via /setup
+    # (disclosed_intercept_hosts), yet must still be intercepted and fire.
+    creds = _creds([
+        {"name": "trip", "hosts": ["secret.example.com"], "action": "block",
+         "visible": False},
+        {"name": "vis", "hosts": ["api.github.com"], "action": "block"},
+    ])
+    disclosed = creds.disclosed_intercept_hosts()
+    assert "secret.example.com" not in disclosed      # hidden host withheld
+    assert "api.github.com" in disclosed              # visible host enumerated
+    assert "secret.example.com" in creds.intercept_hosts()   # operator sees it
+    assert creds.intercepts("secret.example.com")     # decision path still fires
+    log = addon.HostnameLogger(_state(creds))
+    flow = _flow(host="secret.example.com", path="/")
+    log.request(flow)
+    assert flow.response.status_code == 403
+
+
 # ---- first-terminal-wins across phases (P1-A) -------------------------------
 
 def test_terminal_request_rule_suppresses_later_response_rule():

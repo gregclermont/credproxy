@@ -180,11 +180,20 @@ matches what the proxy will do:
 $ credproxy workspace myproj rule test DELETE https://api.github.com/repos/a/b
 matched: gh-no-delete → block 403
 $ credproxy workspace myproj rule test GET https://api.github.com/users/x
-matched: scrub-emails → script:scrub-emails (may block/respond/rewrite)
+matched: scrub-emails → script:scrub-emails (response-phase; may rewrite the response)  [hidden]
 ```
 
+(The builtin `scrub-emails` is response-only and default-hidden, so it renders as
+a response-phase effect with the `[hidden]` marker. A request-active script that
+*might* block reads `(may block/respond/rewrite)`, and any rule listed after it is
+annotated as conditional on that script not terminating.)
+
 Rules ride the existing push path (`start` / `apply`), drift tracking (an
-`applied-rules.json` sibling of `applied-bindings.json`), and `inspect`.
+`applied-rules.json` sibling of `applied-bindings.json`), and `inspect`. Because
+`/admin/config` is replace-all, **a rule edit re-pushes the whole config on the
+next `apply`/`start`, re-fetching every binding's secret from its provider** — so
+a credential-free rule change can still trigger a keychain/1Password prompt. A
+rules-only update path is a possible follow-up.
 
 ## Authoring a rule script
 
@@ -204,6 +213,12 @@ A rule physically cannot touch credential material — so, unlike injector scrip
 **rule-script errors are reported in full** (message + location), a real
 authoring-UX win. Referencing a forbidden primitive fails at config push with a
 clear message.
+
+**Fail-closed applies to your script too.** A rule-script hook that raises yields
+a `502` (the flow is governed, never forwarded un-governed). Response rules also
+run on upstream **error** responses, so a hook that assumes a 200-shaped body
+should guard on `resp_status()` (and `resp_json() == None`) rather than let an
+unexpected body raise into a 502.
 
 Example (the builtin `scrub-emails`, a response-phase scrubber):
 

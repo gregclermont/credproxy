@@ -188,7 +188,10 @@ async def setup(request: web.Request) -> web.Response:
         "workspace": os.environ.get("CREDPROXY_WORKSPACE") or None,
         "ca_url": "http://proxy.local/ca.crt",
         "env": CA_ENV,
-        "intercept_hosts": sorted(state.creds.intercept_hosts()),
+        # Least disclosure: hosts referenced ONLY by a hidden rule are withheld
+        # here (a hidden tripwire must not be passively enumerable via /setup);
+        # the decision path still intercepts them.
+        "intercept_hosts": sorted(state.creds.disclosed_intercept_hosts()),
         "bindings": workspace_bindings(state.creds),
         # Least disclosure: only VISIBLE rules are enumerated (name, hosts,
         # methods, path, action -- never script source or rewrite values); hidden

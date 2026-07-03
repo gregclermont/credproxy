@@ -385,7 +385,7 @@ class Renderer:
         for m in matches:
             detail = m["action"]
             if m.get("script"):
-                if m.get("terminal"):
+                if m.get("may_terminate"):
                     detail = f"script:{m['script']} (may block/respond/rewrite)"
                 else:
                     detail = (f"script:{m['script']} "
@@ -393,7 +393,9 @@ class Renderer:
             elif m["action"] in ("block", "respond") and m.get("status"):
                 detail = f"{m['action']} {m['status']}"
             vis = "" if m["visible"] else "  [hidden]"
-            print(f"matched: {m['name']} → {detail}{vis}")
+            cond = ("  (only if a preceding script doesn't block/respond)"
+                    if m.get("conditional") else "")
+            print(f"matched: {m['name']} → {detail}{vis}{cond}")
 
     # -- injector / provider list --
     def def_list(self, kind: str, rows: list[dict]) -> None:

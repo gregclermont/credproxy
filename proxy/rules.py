@@ -218,6 +218,22 @@ class RuleSet:
     def intercept_hosts(self) -> set[str]:
         return set(self.intercept_literals) | {p for (p, _) in self.intercept_patterns}
 
+    def disclosed_hosts(self) -> set[str]:
+        """Hosts contributed by VISIBLE rules only -- the /setup enumeration
+        surface. A host referenced ONLY by a HIDDEN rule is still intercepted
+        (intercepts() uses the full set) but must NOT be enumerated here, or a
+        hidden tripwire on a bindings-free host is passively discoverable via a
+        single /setup read -- defeating the *unenumerated* half of the visibility
+        contract (interception being detectable via the CA chain is the weaker,
+        documented caveat; proactive name disclosure is not)."""
+        out: set[str] = set()
+        for r in self._rules:
+            if not r.visible:
+                continue
+            out |= set(r.host_literals)
+            out |= {h for h in r.hosts if hostmatch.is_pattern(h)}
+        return out
+
     def inward_rules(self) -> list[dict]:
         """Least-disclosure descriptors for /setup: name, hosts, methods, path,
         action -- never script source, never a rewrite's header values. HIDDEN

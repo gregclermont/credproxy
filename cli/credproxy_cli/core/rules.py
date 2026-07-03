@@ -467,8 +467,10 @@ def _matches(rule: Rule, method: str, host: str, path: str) -> bool:
 class RuleMatch:
     name: str
     action: str
-    terminal: bool     # block/respond (or a script, which MAY be terminal)
+    terminal: bool          # DEFINITELY terminal at runtime (block/respond)
     visible: bool
+    may_terminate: bool = False  # a request-active script: MIGHT block/respond
+    conditional: bool = False    # only reached if a preceding script doesn't terminate
 
 
 # Mirror of proxy/starlark_runtime._defines_hook: does the script define a
@@ -497,21 +499,31 @@ def _script_is_request_active(rule: Rule) -> bool:
 
 
 def match_rules(rules: list[Rule], method: str, host: str, path: str) -> list[RuleMatch]:
-    """The rules that match a request, in declaration order, up to and including
-    the first terminal one. A `script` is possibly-terminal ONLY if it can run in
-    the request phase (defines on_request) -- the proxy decides at runtime, so we
-    stop there. A response-only script (e.g. a scrubber) has no request-phase
-    effect, so it is non-terminal and evaluation continues -- otherwise a later
-    `block` would be hidden from the dry-run."""
+    """The rules that match a request, in declaration order. Only a `block`/
+    `respond` is DEFINITELY terminal -- evaluation stops there. A request-active
+    script (defines on_request) MIGHT block/respond at runtime, but the dry-run
+    can't know, so it does NOT stop: it's flagged `may_terminate`, and every
+    later match is flagged `conditional` (reached only if that script doesn't
+    terminate) -- so a definite later `block` is still reported. A response-only
+    script has no request-phase effect at all (neither terminal nor conditional-
+    inducing)."""
     out: list[RuleMatch] = []
+    conditional = False
     for r in rules:
         if not _matches(r, method, host, path):
             continue
         if r.action == "script":
-            terminal = _script_is_request_active(r)
-        else:
-            terminal = r.action in _TERMINAL_ACTIONS
-        out.append(RuleMatch(r.name, r.action, terminal, r.effective_visible))
+            request_active = _script_is_request_active(r)
+            out.append(RuleMatch(r.name, r.action, terminal=False,
+                                 visible=r.effective_visible,
+                                 may_terminate=request_active,
+                                 conditional=conditional))
+            if request_active:
+                conditional = True   # later rules only fire if this one doesn't
+            continue
+        terminal = r.action in _TERMINAL_ACTIONS
+        out.append(RuleMatch(r.name, r.action, terminal=terminal,
+                             visible=r.effective_visible, conditional=conditional))
         if terminal:
             break
     return out

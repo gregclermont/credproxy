@@ -56,6 +56,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import audit
 import hostmatch
 import rules as rules_mod
 import schemes
@@ -91,6 +92,7 @@ class InwardBinding:
 class Credentials(Protocol):
     def intercepts(self, sni: str | None) -> bool: ...
     def intercept_hosts(self) -> set[str]: ...
+    def disclosed_intercept_hosts(self) -> set[str]: ...
     def transforms_for(self, host: str) -> list[Transform]: ...
     def inward_bindings(self) -> list[InwardBinding]: ...
     def rule_set(self) -> RuleSet: ...
@@ -153,6 +155,16 @@ class BindingCredentials:
         live = {h for h in list(self._runtime) if self._live(h)}
         return (set(self._hosts) | {p for (p, _, _) in self._patterns}
                 | self._rules.intercept_hosts() | live)
+
+    def disclosed_intercept_hosts(self) -> set[str]:
+        """`intercept_hosts()` minus hosts referenced ONLY by hidden rules -- the
+        workspace-facing /setup enumeration surface (least disclosure). Binding
+        and live re-seal hosts are always disclosed (bindings are enumerated in
+        /setup anyway); only rule hosts are visibility-filtered. The decision path
+        (`intercepts()`) still uses the full set, so a hidden rule still fires."""
+        live = {h for h in list(self._runtime) if self._live(h)}
+        return (set(self._hosts) | {p for (p, _, _) in self._patterns}
+                | self._rules.disclosed_hosts() | live)
 
     def rule_set(self) -> RuleSet:
         return self._rules
@@ -225,15 +237,17 @@ class RuntimeMinter:
     of a config import."""
 
     def __init__(self, creds: "BindingCredentials", generate_placeholder,
-                 source_binding: str | None = None):
+                 source_binding: str | None = None,
+                 source_host: str | None = None):
         self._creds = creds
         self._generate = generate_placeholder
-        # The re-seal binding this mint is on behalf of. Named into the runtime
-        # transform so the LATER injection audit event (when the minted
-        # placeholder is used on an API host) carries `reseal:<source>` and can be
-        # correlated with the earlier `reseal` mint event's binding name. Without
-        # it the injection would audit an uncorrelatable synthetic placeholder id.
+        # The re-seal binding (and token-endpoint host) this mint is on behalf of.
+        # Named into the runtime transform so the LATER injection audit event (when
+        # the minted placeholder is used on an API host) carries `reseal:<source>`
+        # and correlates with the `reseal` mint event emitted here. Without it the
+        # injection would audit an uncorrelatable synthetic placeholder id.
         self._source_binding = source_binding
+        self._source_host = source_host
 
     def mint(self, value: str, ttl: float | None, api_hosts, header: str = "Authorization") -> str:
         if not api_hosts:
@@ -255,6 +269,12 @@ class RuntimeMinter:
         )
         for host in api_hosts:
             self._creds.register_runtime(host, transform, ttl=ttl)
+        # Emit the mint audit HERE, not on the scheme's return value: a re-seal
+        # SCRIPT that mints but doesn't `return True` would otherwise register the
+        # swap silently, leaving later `inject` events uncorrelated. This tracks
+        # the actual registration.
+        audit.emit("reseal", binding=self._source_binding, host=self._source_host,
+                   api_hosts=list(api_hosts), outcome="minted")
         return placeholder
 
 

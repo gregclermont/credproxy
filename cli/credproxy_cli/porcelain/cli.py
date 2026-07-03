@@ -1060,7 +1060,8 @@ def do_rule_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         r = by_name[m.name]
         rows.append({"name": m.name, "action": m.action, "visible": m.visible,
                      "script": r.script, "status": r.status,
-                     "terminal": m.terminal})
+                     "terminal": m.terminal, "may_terminate": m.may_terminate,
+                     "conditional": m.conditional})
     render.OUT.rule_test(a.method.upper(), a.url, rows)
 
 
