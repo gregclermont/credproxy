@@ -515,3 +515,29 @@ def test_docstring_def_not_misclassified_as_request_hook():
     flow = _flow(host="api.github.com", path="/users/x")   # resp=False
     log.request(flow)
     assert flow.response is None            # passed through, NOT a 502
+
+
+def test_defines_hook_parity_with_cli_mirror():
+    # The CLI mirrors _defines_hook so `rule test` agrees with the proxy on a
+    # script's phase. Cross-compare over the edge cases (docstring/comment/string
+    # `def` lines). Skips if cli/ isn't mounted (bare proxy-suite run).
+    import sys as _sys
+    if "/opt/cli" not in _sys.path:
+        _sys.path.insert(0, "/opt/cli")
+    try:
+        from credproxy_cli.core.rules import _defines_hook as cli_defines
+    except Exception:
+        pytest.skip("credproxy_cli not importable (cli/ not mounted)")
+    from starlark_runtime import _defines_hook as proxy_defines
+    fixtures = [
+        "def on_request():\n    pass\n",
+        "def on_response():\n    pass\n",
+        '"""\ndef on_request(): fake\n"""\ndef on_response():\n    pass\n',
+        "# def on_request(): comment\ndef on_response():\n    pass\n",
+        'x = "def on_request()"\ndef on_response():\n    pass\n',
+        "def on_response():\n    '''\ndef on_request(): fake\n    '''\n    return\n",
+        "def on_request():\n    pass\ndef on_response():\n    pass\n",
+    ]
+    for src in fixtures:
+        for hook in ("on_request", "on_response"):
+            assert cli_defines(src, hook) == proxy_defines(src, hook), (src, hook)

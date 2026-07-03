@@ -466,7 +466,7 @@ def _load_rules(raw_rules, source: str) -> RuleSet:
                 err = hostmatch.validate_pattern(h)
                 if err:
                     _fail(f"{source}: {where}.hosts: {err}")
-                host_patterns.append(hostmatch.compile_pattern(h.lower()))
+                host_patterns.append((h, hostmatch.compile_pattern(h.lower())))
             else:
                 host_literals.add(h.lower())
 

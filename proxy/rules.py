@@ -34,7 +34,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-import hostmatch
 from schemes import RequestCtx, ResponseCtx
 
 # The declarative action families. `script` is the escape hatch (terminal-ness
@@ -108,7 +107,9 @@ class Rule:
     name: str
     hosts: tuple[str, ...]                  # original spellings, for disclosure
     host_literals: frozenset[str]           # lowercased exact hosts
-    host_patterns: tuple[re.Pattern, ...]   # compiled globs
+    # (original spelling, compiled glob) pairs -- the string is kept for /setup
+    # disclosure and intercept enumeration, so nothing has to re-pair them later.
+    host_patterns: tuple[tuple[str, "re.Pattern"], ...]
     methods: frozenset[str] | None          # uppercased; None = all methods
     path_glob: str | None                   # original, for disclosure
     path_rx: re.Pattern | None              # None = all paths
@@ -162,7 +163,7 @@ class Rule:
         method case-insensitively; path against the query-stripped target."""
         h = host.lower()
         if h not in self.host_literals \
-                and not any(rx.fullmatch(h) for rx in self.host_patterns):
+                and not any(rx.fullmatch(h) for (_, rx) in self.host_patterns):
             return False
         if self.methods is not None and method.upper() not in self.methods:
             return False
@@ -186,13 +187,9 @@ class RuleSet:
             h for r in self._rules for h in r.host_literals
         )
         # (original_pattern_str, compiled_rx) for intercept enumeration/decision.
+        # Rule already carries the pairs, so no re-pairing/zip is needed.
         self.intercept_patterns: list[tuple[str, re.Pattern]] = [
-            (orig, rx)
-            for r in self._rules
-            for orig, rx in zip(
-                (h for h in r.hosts if hostmatch.is_pattern(h)),
-                r.host_patterns,
-            )
+            pair for r in self._rules for pair in r.host_patterns
         ]
 
     def __bool__(self) -> bool:
@@ -231,7 +228,7 @@ class RuleSet:
             if not r.visible:
                 continue
             out |= set(r.host_literals)
-            out |= {h for h in r.hosts if hostmatch.is_pattern(h)}
+            out |= {orig for (orig, _) in r.host_patterns}
         return out
 
     def inward_rules(self) -> list[dict]:

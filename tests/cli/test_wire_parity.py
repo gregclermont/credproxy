@@ -104,3 +104,39 @@ def test_rule_wire_config_round_trips_through_proxy(xdg):
         pytest.fail(f"rule wire config rejected by proxy load_resolved: "
                     f"{type(e).__name__}: {e}")
     assert {r.name for r in creds.rule_set().all()} == {"blk", "stub", "rw"}
+
+
+def _proxy_module(name):
+    proxy_dir = str(Path(__file__).resolve().parents[2] / "proxy")
+    if proxy_dir not in sys.path:
+        sys.path.insert(0, proxy_dir)
+    import importlib
+    return importlib.import_module(name)
+
+
+def test_hostmatch_compile_pattern_parity():
+    """The CLI's hostmatch.compile_pattern mirror (used by `rule test` to match
+    host globs on the host) must agree with the proxy's over the same inputs."""
+    from credproxy_cli.core import hostmatch as cli_hm
+    proxy_hm = _proxy_module("hostmatch")
+    pats = ["*.example.com", "s3.*.amazonaws.com", "*.amazonaws.com"]
+    hosts = ["a.example.com", "x.y.example.com", "API.Example.COM",
+             "s3.eu-west-1.amazonaws.com", "example.com", "evil.com"]
+    for pat in pats:
+        for host in hosts:
+            assert bool(cli_hm.compile_pattern(pat).fullmatch(host.lower())) == \
+                   bool(proxy_hm.compile_pattern(pat).fullmatch(host.lower())), \
+                   (pat, host)
+
+
+def test_rule_constants_parity():
+    """The mirrored rule constants must stay identical across the CLI and proxy
+    (and, for the forbidden set, the two proxy copies) -- a one-sided edit would
+    make `rule add`/`validate` disagree with what the proxy enforces."""
+    from credproxy_cli.core import rules as cli_rules
+    proxy_config = _proxy_module("config")
+    proxy_rules = _proxy_module("rules")
+    assert cli_rules._VISIBLE_DEFAULT == proxy_config._VISIBLE_DEFAULT
+    assert cli_rules._FORBIDDEN_REWRITE_HEADERS \
+        == proxy_config._FORBIDDEN_REWRITE_HEADERS \
+        == proxy_rules._FORBIDDEN_REWRITE_HEADERS
