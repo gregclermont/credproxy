@@ -113,6 +113,28 @@ def _load_applied_bindings(ws: Workspace) -> list[dict] | None:
         return None
 
 
+def _write_applied_rules(ws: Workspace, rules) -> None:
+    """Write rule metadata to applied-rules.json (a sibling of
+    applied-bindings.json). Rules carry no secret, so this records the whole wire
+    shape -- name, hosts, methods, path, action, visibility, action params, and
+    a script rule's source. Used for drift detection."""
+    from .rules import rule_wire_entries
+
+    ws.ensure_state_dir()
+    atomic_write_text(ws.applied_rules_path,
+                      json.dumps(rule_wire_entries(rules), indent=2) + "\n")
+
+
+def _load_applied_rules(ws: Workspace) -> list[dict] | None:
+    """Load the last recorded applied rules. Returns None if not present."""
+    if not ws.applied_rules_path.exists():
+        return None
+    try:
+        return json.loads(ws.applied_rules_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def create_workspace_files(ws: Workspace) -> None:
     if ws.exists():
         raise WorkspaceError(
@@ -581,16 +603,19 @@ def _start_workspace_locked(ws: Workspace, notify: Notify = _noop,
     # provider calls it implies) when the already-running proxy reports the
     # intended config's fingerprint. The proxy's tmpfs config does not survive a
     # restart, so a (re)started proxy (proxy_fresh) always gets a push.
-    from .bindings import config_fingerprint, materialize_bindings
+    from .bindings import materialize_bindings
+    from .rules import combined_fingerprint, materialize_rules
     bindings = materialize_bindings(ws, notify)
-    want_fp = config_fingerprint(bindings)
+    rules = materialize_rules(ws, notify)
+    want_fp = combined_fingerprint(bindings, rules)
     status = None if (force_push or proxy_fresh) else proxy_status(ws, host_port)
     if _should_push(force_push, proxy_fresh, status, want_fp):
         notify("pushing config...")
-        pushed_bindings = push_config(ws, host_port, notify,
-                                      bindings=bindings, fingerprint=want_fp)
-        if pushed_bindings is not None:
-            _write_applied_bindings(ws, pushed_bindings)
+        pushed_bindings, pushed_rules = push_config(
+            ws, host_port, notify, bindings=bindings, rules=rules,
+            fingerprint=want_fp)
+        _write_applied_bindings(ws, pushed_bindings)
+        _write_applied_rules(ws, pushed_rules)
     else:
         notify("config unchanged on the proxy; skipped push "
                "(use `enter --push` to refresh)")
@@ -893,6 +918,7 @@ class WorkspaceInspect:
     host_port: int | None       # resolved proxy host port when running
     bindings: tuple[BindingSummary, ...]
     drift: DriftReport
+    rules: tuple = ()           # tuple of core.rules.Rule (traffic governance)
 
 
 def _compute_drift(
@@ -900,11 +926,13 @@ def _compute_drift(
     cfg: dict,
     current_bindings: list,   # list of BindingSummary-like (name, injector, provider, secret, hosts, placeholder, env)
     running: bool,
+    current_rules: list | None = None,   # list of core.rules.Rule
 ) -> DriftReport:
-    """Compare current config against the last applied spec + bindings.
+    """Compare current config against the last applied spec + bindings + rules.
 
     Container-spec drift is compared against applied-spec.json.
     Bindings drift is compared against applied-bindings.json.
+    Rules drift is compared against applied-rules.json.
     Returns a DriftReport with all detected changes."""
     changes: list[DriftItem] = []
 
@@ -1034,7 +1062,54 @@ def _compute_drift(
                     configured=_binding_summary_dict(cb),
                 ))
 
+    # ---- rules drift ----
+    if current_rules is not None:
+        changes.extend(_rules_drift(ws, current_rules, running))
+
     return DriftReport(in_sync=len(changes) == 0, changes=tuple(changes))
+
+
+def _rules_drift(ws: Workspace, current_rules: list, running: bool) -> list:
+    """Rule drift against applied-rules.json, keyed by name. Robust to an
+    unresolved script (surfaced as a single 'rules unresolved' item rather than
+    crashing inspect/apply)."""
+    from .errors import CredproxyError
+    from .rules import rule_wire_entries
+
+    out: list[DriftItem] = []
+    try:
+        current = {e["name"]: e for e in rule_wire_entries(current_rules)}
+    except CredproxyError as e:
+        return [DriftItem(kind="rules", item=f"rules unresolved ({e})",
+                          applied=None, configured=None)]
+
+    applied = _load_applied_rules(ws)
+    if applied is None:
+        if running and current:
+            out.append(DriftItem(kind="rules", item="state unknown (re-push)",
+                                 applied=None, configured=None))
+        return out
+    applied_by_name = {e["name"]: e for e in applied}
+    for name, entry in current.items():
+        if name not in applied_by_name:
+            out.append(DriftItem(kind="rules", item=f"rule added: '{name}'",
+                                 applied=None, configured=entry))
+        elif entry != applied_by_name[name]:
+            out.append(DriftItem(kind="rules", item=f"rule changed: '{name}'",
+                                 applied=applied_by_name[name], configured=entry))
+    for name in applied_by_name:
+        if name not in current:
+            out.append(DriftItem(kind="rules", item=f"rule removed: '{name}'",
+                                 applied=applied_by_name[name], configured=None))
+    # Reorder-only change: same rules, different DECLARATION ORDER. Rules
+    # evaluate in order (first-terminal-wins), so this is a behavioral change
+    # even though every rule is individually unchanged -- surface it so `apply`
+    # re-pushes (the name-keyed comparison above would otherwise miss it).
+    cur_order, app_order = list(current), [e["name"] for e in applied]
+    if cur_order != app_order and set(cur_order) == set(app_order):
+        out.append(DriftItem(kind="rules", item="rules reordered",
+                             applied=app_order, configured=cur_order))
+    return out
 
 
 def _binding_summary_dict(b) -> dict:
@@ -1093,7 +1168,11 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
         for b in parsed
     )
 
-    drift = _compute_drift(ws, cfg, bindings, running)
+    from .rules import _parse_rules as _parse_rules_r
+    from .rules import _with_auto_names as _with_auto_names_r
+    current_rules = _with_auto_names_r(_parse_rules_r(raw, str(ws.config_path)))
+
+    drift = _compute_drift(ws, cfg, bindings, running, current_rules=current_rules)
 
     return WorkspaceInspect(
         name=ws.name,
@@ -1104,6 +1183,7 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
         running=running,
         host_port=host_port,
         bindings=bindings,
+        rules=tuple(current_rules),
         drift=drift,
     )
 
@@ -1165,7 +1245,12 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
         for b in current_bindings_parsed
     ]
 
-    drift = _compute_drift(ws, cfg, current_binding_summaries, running=True)
+    from .rules import _parse_rules as _parse_rules_r
+    from .rules import _with_auto_names as _with_auto_names_r
+    current_rules = _with_auto_names_r(_parse_rules_r(raw, str(ws.config_path)))
+
+    drift = _compute_drift(ws, cfg, current_binding_summaries, running=True,
+                           current_rules=current_rules)
 
     applied_labels: list[str] = []
     deferred_labels: list[str] = []
@@ -1178,17 +1263,19 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
             f"credproxy workspace {ws.name} start)"
         )
 
-    # Bindings drift -> push.
-    bindings_changes = [c for c in drift.changes if c.kind == "bindings"]
-    if bindings_changes:
-        binding_items = [c.item for c in bindings_changes]
-        pushed_bindings = push_config(ws, host_port, notify)
-        if pushed_bindings is not None:
-            _write_applied_bindings(ws, pushed_bindings)
-        applied_labels.append(f"bindings ({', '.join(binding_items)})")
-    elif not container_changes:
-        # No drift at all.
-        pass
+    # Bindings and/or rules drift -> ONE push (they ride the same wire config).
+    binding_changes = [c for c in drift.changes if c.kind == "bindings"]
+    rule_changes = [c for c in drift.changes if c.kind == "rules"]
+    if binding_changes or rule_changes:
+        pushed_bindings, pushed_rules = push_config(ws, host_port, notify)
+        _write_applied_bindings(ws, pushed_bindings)
+        _write_applied_rules(ws, pushed_rules)
+        if binding_changes:
+            applied_labels.append(
+                f"bindings ({', '.join(c.item for c in binding_changes)})")
+        if rule_changes:
+            applied_labels.append(
+                f"rules ({', '.join(c.item for c in rule_changes)})")
 
     return ApplyResult(
         applied=tuple(applied_labels),

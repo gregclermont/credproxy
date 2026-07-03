@@ -775,12 +775,12 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
     def fake_push(ws, port, notify=None):
         pushed.append(True)
-        return [Binding(
+        return ([Binding(
             name="myb", injector="github", provider="env",
             secret="TOK", hosts=("api.github.com",),
             placeholder="ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             env="GITHUB_TOKEN",
-        )]
+        )], [])
 
     monkeypatch.setattr("credproxy_cli.core.lifecycle.push_config", fake_push)
 
@@ -826,11 +826,11 @@ placeholder = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
     def fake_push(ws, port, notify=None):
         pushed.append(True)
-        return [Binding(
+        return ([Binding(
             name="myb", injector="github", provider="env", secret="TOK",
             hosts=("api.github.com",),
             placeholder="ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            env="GITHUB_TOKEN")]
+            env="GITHUB_TOKEN")], [])
 
     monkeypatch.setattr("credproxy_cli.core.lifecycle.push_config", fake_push)
 

@@ -51,7 +51,7 @@ RESERVED_NAMES = frozenset({
     "create", "use", "list", "enter", "edit", "start", "stop", "recreate",
     "delete", "apply", "inspect", "config", "logs", "bind-dir",
     # sub-nouns
-    "binding", "mount",
+    "binding", "mount", "rule",
     # top-level meta commands (no workspace argument)
     "current", "info",
 })
@@ -97,6 +97,12 @@ class Workspace:
         """JSON file recording binding metadata last pushed to the proxy
         (written after a successful push). No secret values."""
         return self.state_dir / "applied-bindings.json"
+
+    @property
+    def applied_rules_path(self) -> Path:
+        """JSON file recording rule metadata last pushed to the proxy (written
+        after a successful push). No secrets -- rules never carry any."""
+        return self.state_dir / "applied-rules.json"
 
     @property
     def sessions_dir(self) -> Path:

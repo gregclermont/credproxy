@@ -53,7 +53,7 @@ from .render import fail, say
 # Workspace-scoped verbs (the `workspace NAME <verb>` tail).
 _WS_VERBS = {
     "enter", "edit", "start", "stop", "recreate", "delete", "apply", "inspect",
-    "config", "logs", "binding", "bind-dir", "mount",
+    "config", "logs", "binding", "bind-dir", "mount", "rule",
 }
 # Workspace-level verbs that take a name as their argument, not a subject.
 _WS_NOUN_VERBS = {"create", "use", "list"}
@@ -468,6 +468,18 @@ def do_inspect(ctx: Ctx, name: str | None) -> None:
             }
             for b in data.bindings
         ],
+        "rules": [
+            {
+                "name": r.name,
+                "hosts": list(r.hosts),
+                "methods": list(r.methods) if r.methods else None,
+                "path": r.path,
+                "action": r.action,
+                "visible": r.effective_visible,
+                "script": r.script,
+            }
+            for r in data.rules
+        ],
         "drift": {
             "in_sync": data.drift.in_sync,
             "changes": [
@@ -486,12 +498,75 @@ def do_inspect(ctx: Ctx, name: str | None) -> None:
     })
 
 
-def do_logs(ctx: Ctx, name: str | None) -> None:
+def do_logs(ctx: Ctx, name: str | None, audit: bool = False) -> None:
     ws = _resolve_ws(ctx, name)
+    if audit:
+        _logs_audit(ws, ctx.json)
+        return
     if ctx.json:
         _logs_json(ws)
         return
     os.execvp("docker", ["docker", "logs", "-f", ws.proxy_container])
+
+
+_AUDIT_TAG = "[audit] "
+
+
+def _logs_audit(ws: Workspace, as_json: bool) -> None:
+    """Stream only the proxy's structured `[audit]` events (#24).
+
+    The proxy emits `[audit] {json}` lines (see proxy/audit.py) interleaved with
+    ordinary debug output; docker's log driver is the durable store (survives
+    stop/start). We tail `docker logs -f`, keep only the audit lines, and either
+    pretty-print each event (default) or pass the raw event object through as
+    JSON-lines (`--json`)."""
+    import json
+    import subprocess
+
+    proc = subprocess.Popen(
+        ["docker", "logs", "-f", ws.proxy_container],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    interrupted = False
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            idx = line.find(_AUDIT_TAG)
+            if idx < 0:
+                continue
+            payload = line[idx + len(_AUDIT_TAG):].strip()
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue  # a malformed/truncated audit line: skip, don't crash
+            if as_json:
+                print(json.dumps(event), flush=True)
+            else:
+                print(_format_audit_event(event), flush=True)
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        proc.terminate()
+        rc = proc.wait()
+    if not interrupted and rc:
+        fail(f"docker logs exited with status {rc}")
+
+
+def _format_audit_event(e: dict) -> str:
+    """One-line human rendering of an audit event. Tolerant of missing keys so a
+    future event kind still prints something useful."""
+    ts = e.get("ts", "")
+    kind = e.get("event", "?")
+    method = e.get("method", "")
+    host = e.get("host", "")
+    path = e.get("path", "")
+    where = f"{method} {host}{path}".strip()
+    subject = e.get("binding") or e.get("rule") or ""
+    outcome = e.get("outcome", "")
+    detail = " ".join(p for p in (subject and f"'{subject}'", outcome) if p)
+    return f"{ts}  {kind:<9} {where}  {detail}".rstrip()
 
 
 def _logs_json(ws: Workspace) -> None:
@@ -808,6 +883,138 @@ def _do_binding_test_adhoc(ctx: Ctx, name: str | None, a: argparse.Namespace) ->
         sys.exit(1)
 
 
+# ---- rule commands -----------------------------------------------------------
+
+
+def _parse_kv(values: list[str] | None, flag: str) -> dict | None:
+    """Parse repeated `K=V` flags into a dict (order-preserving). None if unset."""
+    if not values:
+        return None
+    out: dict[str, str] = {}
+    for v in values:
+        key, sep, val = v.partition("=")
+        if not sep or not key:
+            fail(f"{flag} '{v}' must be K=V")
+        out[key] = val
+    return out
+
+
+def _rule_row(rule) -> dict:
+    """Workspace-safe rule summary for rendering (no secret -- rules have none)."""
+    return {
+        "name": rule.name,
+        "hosts": list(rule.hosts),
+        "methods": list(rule.methods) if rule.methods else None,
+        "path": rule.path,
+        "action": rule.action,
+        "visible": rule.effective_visible,
+        "script": rule.script,
+        "status": rule.status,
+    }
+
+
+def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    from ..core import rules as core_rules
+    from ..core.rules import Rule
+
+    if not a.host:
+        fail("`rule add` needs at least one --host")
+    if a.action not in core_rules.ACTIONS:
+        fail(f"`rule add` needs --action one of {', '.join(core_rules.ACTIONS)}")
+
+    kwargs: dict = {}
+    if a.action == "block":
+        if a.status is not None:
+            kwargs["status"] = a.status
+    elif a.action == "respond":
+        if a.status is None:
+            fail("`rule add --action respond` needs --status")
+        kwargs["status"] = a.status
+        kwargs["body"] = a.body
+        kwargs["headers"] = _parse_kv(a.header, "--header")
+    elif a.action == "rewrite":
+        sh = _parse_kv(a.header, "--header")
+        rsh = _parse_kv(a.resp_header, "--resp-header")
+        rh = tuple(a.remove_header) if a.remove_header else None
+        rrh = tuple(a.resp_remove_header) if a.resp_remove_header else None
+        if not (sh or rsh or rh or rrh):
+            fail("`rule add --action rewrite` needs at least one of --header/"
+                 "--remove-header/--resp-header/--resp-remove-header")
+        kwargs.update(set_headers=sh, remove_headers=rh,
+                      resp_set_headers=rsh, resp_remove_headers=rrh)
+    elif a.action == "script":
+        if not a.script:
+            fail("`rule add --action script` needs --script NAME")
+        kwargs["script"] = a.script
+
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+
+    with ws.lock():                          # atomic read-validate-write
+        existing = core_rules.load_rules(ws)
+        taken = {r.name for r in existing}
+        rule = Rule(
+            name=None, hosts=tuple(a.host), action=a.action,
+            methods=tuple(m.upper() for m in a.method) if a.method else None,
+            path=a.path, visible=a.rule_visible, **kwargs,
+        )
+        rname = a.rule_name or core_rules._auto_name(rule, taken)
+        if rname in taken:
+            fail(f"rule name '{rname}' already exists in workspace '{ws.name}'")
+        from dataclasses import replace as _replace
+        rule = _replace(rule, name=rname)
+        core_rules.validate(existing + [rule], str(ws.config_path))
+        core_rules.append_rule(ws, rule)
+
+    render.OUT.rule_added(rname, ws.name, _rule_row(rule))
+
+
+def do_rule_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    from ..core import rules as core_rules
+
+    implicit = name is None
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+    _confirm_destructive(ctx, ws, implicit, "remove rule from")
+    with ws.lock():
+        core_rules.remove_rule(ws, a.rule_name)
+    render.OUT.rule_removed(a.rule_name, ws.name)
+
+
+def do_rule_list(ctx: Ctx, name: str | None) -> None:
+    from ..core import rules as core_rules
+
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+    rules = core_rules.materialize_rules(ws, notify=say)
+    render.OUT.rule_list(ws.name, [_rule_row(r) for r in rules])
+
+
+def do_rule_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    from urllib.parse import urlsplit
+
+    from ..core import rules as core_rules
+
+    ws = _resolve_ws(ctx, name)
+    _require_exists(ws)
+    parts = urlsplit(a.url)
+    host = parts.hostname
+    if not host:
+        fail(f"'{a.url}' has no host (use a full URL, e.g. https://api.github.com/x)")
+    path = parts.path or "/"
+    rules = core_rules.materialize_rules(ws, notify=say)
+    matches = core_rules.match_rules(rules, a.method, host, path)
+    # Enrich each match with the rule's action detail (status/script) for display.
+    by_name = {r.name: r for r in rules}
+    rows = []
+    for m in matches:
+        r = by_name[m.name]
+        rows.append({"name": m.name, "action": m.action, "visible": m.visible,
+                     "script": r.script, "status": r.status,
+                     "terminal": m.terminal})
+    render.OUT.rule_test(a.method.upper(), a.url, rows)
+
+
 # ---- mount commands ----------------------------------------------------------
 
 
@@ -1018,6 +1225,44 @@ def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
     p.add_argument("--secret", action="append", metavar="REF|SLOT=REF")
 
 
+def _rule_subparsers(parent: argparse._SubParsersAction) -> None:
+    p = parent.add_parser("add")
+    p.add_argument("--host", action="append", metavar="HOST|GLOB")
+    p.add_argument("--action", default=None,
+                   help="block | respond | rewrite | script")
+    p.add_argument("--method", action="append", metavar="METHOD",
+                   help="restrict to these methods (repeatable; default all)")
+    p.add_argument("--path", default=None, metavar="GLOB",
+                   help="path glob: * within a segment, ** across (e.g. /repos/**)")
+    p.add_argument("--name", dest="rule_name", default=None)
+    p.add_argument("--visible", dest="rule_visible", action="store_true",
+                   default=None, help="force enumerated + attributed")
+    p.add_argument("--hidden", dest="rule_visible", action="store_false",
+                   default=None, help="force unenumerated + unattributed")
+    p.add_argument("--status", type=int, default=None,
+                   help="block/respond HTTP status")
+    p.add_argument("--body", default=None, help="respond body")
+    p.add_argument("--header", action="append", metavar="K=V",
+                   help="respond header, or rewrite set-header (repeatable)")
+    p.add_argument("--remove-header", action="append", metavar="NAME",
+                   dest="remove_header", help="rewrite: remove a request header")
+    p.add_argument("--resp-header", action="append", metavar="K=V",
+                   dest="resp_header", help="rewrite: set a response header")
+    p.add_argument("--resp-remove-header", action="append", metavar="NAME",
+                   dest="resp_remove_header", help="rewrite: remove a response header")
+    p.add_argument("--script", default=None, metavar="NAME",
+                   help="script action: the .star rule script name")
+
+    p = parent.add_parser("remove")
+    p.add_argument("rule_name", metavar="NAME")
+
+    parent.add_parser("list")
+
+    p = parent.add_parser("test")
+    p.add_argument("method", metavar="METHOD")
+    p.add_argument("url", metavar="URL")
+
+
 def _mount_subparsers(parent: argparse._SubParsersAction) -> None:
     p = parent.add_parser("add")
     p.add_argument("--volume", dest="mount_volume", default=None, metavar="NAME")
@@ -1081,7 +1326,11 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     sub.add_parser("inspect")
     p_config = sub.add_parser("config")
     p_config.add_argument("--declared", action="store_true", dest="config_declared")
-    sub.add_parser("logs")
+    p_logs = sub.add_parser("logs")
+    # --audit filters the stream to the structured `[audit]` events (#24):
+    # credential-use and rule-hit records, pretty-printed (or raw JSON with
+    # --json). Without it, `logs` streams the full proxy log verbatim.
+    p_logs.add_argument("--audit", action="store_true", dest="logs_audit")
 
     p_bind = sub.add_parser("bind-dir")
     # Defaults to the current directory; --dir associates a different one.
@@ -1094,6 +1343,10 @@ def _build_leaf_parser() -> argparse.ArgumentParser:
     mount = sub.add_parser("mount")
     msub = mount.add_subparsers(dest="mountcmd", required=True)
     _mount_subparsers(msub)
+
+    rule = sub.add_parser("rule")
+    rsub = rule.add_subparsers(dest="rulecmd", required=True)
+    _rule_subparsers(rsub)
 
     return parser
 
@@ -1224,6 +1477,34 @@ _MOUNT_ADD_HELP = (
     "                  non-root user can write it -- needed when it mounts at a path\n"
     "                  the image doesn't populate (else root-owned). Requires a\n"
     "                  non-root `user`; not valid for the `home` sugar.\n"
+)
+
+_RULE_ADD_HELP = (
+    "credproxy workspace NAME rule add --host HOST [--host HOST...] --action ACT\n"
+    "  Govern traffic on an intercepted host (no credential involved). ACT is one\n"
+    "  of block|respond|rewrite|script. Adding a rule to a passthrough host makes\n"
+    "  it TLS-intercepted (so the workspace must have bootstrapped the CA).\n"
+    "\n"
+    "  Scoping (all optional):\n"
+    "    --host HOST|GLOB   literal or glob (`*.amazonaws.com`); repeatable\n"
+    "    --method METHOD    restrict to these methods (repeatable; default all)\n"
+    "    --path GLOB        path glob: `*` within a segment, `**` across\n"
+    "                       (e.g. /repos/**); default all paths\n"
+    "    --name NAME        rule name (auto-generated if omitted)\n"
+    "    --visible/--hidden override the per-family enumeration+attribution default\n"
+    "                       (block/respond visible; rewrite/script hidden)\n"
+    "\n"
+    "  Per action:\n"
+    "    block     [--status N]                     refuse (default 403)\n"
+    "    respond   --status N [--body TEXT] [--header K=V ...]   stub a response\n"
+    "    rewrite   [--header K=V] [--remove-header NAME]         request headers\n"
+    "              [--resp-header K=V] [--resp-remove-header NAME]  response headers\n"
+    "    script    --script NAME                    a .star rule script (block/\n"
+    "                                               respond/rewrite via primitives)\n"
+    "\n"
+    "  A visible block self-identifies (X-Credproxy-Rule header + a credproxy JSON\n"
+    "  body); a hidden block is a bare status. Hidden rules are excluded from\n"
+    "  /setup but ALWAYS logged/audited for the operator. See docs/rules.md."
 )
 
 _CREATE_HELP = (
@@ -1371,6 +1652,14 @@ def _verb_help(verb_argv: list[str]) -> str:
             return _MOUNT_ADD_HELP
         return ("credproxy workspace NAME mount add ...\n"
                 "Run `mount add --help` for details.")
+    if verb == "rule":
+        sub = verb_argv[1] if len(verb_argv) > 1 and not verb_argv[1].startswith("-") else ""
+        if sub == "add":
+            return _RULE_ADD_HELP
+        return ("credproxy workspace NAME rule {add|remove|list|test} ...\n"
+                "Rules govern traffic on intercepted hosts (block/respond/rewrite/\n"
+                "script), credential-free. `rule test METHOD URL` dry-runs the\n"
+                "matcher. Run `rule add --help` for details.")
     if verb in _VERB_HELP:
         return _VERB_HELP[verb]
     return f"usage: credproxy workspace NAME {verb}"
@@ -1482,7 +1771,7 @@ def _run_ws_verb(
     elif verb == "config":
         do_config(ctx, name, a.config_declared)
     elif verb == "logs":
-        do_logs(ctx, name)
+        do_logs(ctx, name, getattr(a, "logs_audit", False))
     elif verb == "bind-dir":
         do_bind_dir(ctx, name, a.bind_directory)
     elif verb == "binding":
@@ -1498,6 +1787,16 @@ def _run_ws_verb(
     elif verb == "mount":
         if a.mountcmd == "add":
             do_mount_add(ctx, name, a)
+    elif verb == "rule":
+        rc = a.rulecmd
+        if rc == "add":
+            do_rule_add(ctx, name, a)
+        elif rc == "remove":
+            do_rule_remove(ctx, name, a)
+        elif rc == "list":
+            do_rule_list(ctx, name)
+        elif rc == "test":
+            do_rule_test(ctx, name, a)
 
 
 def _parse_create(argv: list[str]) -> argparse.Namespace:
@@ -1530,7 +1829,7 @@ def _create_dir(a: argparse.Namespace) -> str | None:
 
 _ALIAS_TO_WS_VERB = {
     "enter", "edit", "start", "stop", "recreate", "delete", "apply", "inspect",
-    "config", "logs", "binding", "bind-dir", "mount",
+    "config", "logs", "binding", "bind-dir", "mount", "rule",
 }
 
 
@@ -1566,6 +1865,13 @@ def _dispatch_alias(ctx: Ctx, head: str, rest: list[str], trailing: list[str]) -
         # on the resolved default workspace; explicit names use the canonical
         # `workspace NAME mount` form.
         _run_ws_verb(ctx, None, ["mount", *rest], trailing)
+        return
+
+    if head == "rule":
+        # Same as `binding`/`mount`: the sub-noun's subcommand would be eaten as
+        # a NAME by the generic path. Always acts on the resolved default
+        # workspace; explicit names use `workspace NAME rule`.
+        _run_ws_verb(ctx, None, ["rule", *rest], trailing)
         return
 
     if head in _ALIAS_TO_WS_VERB:

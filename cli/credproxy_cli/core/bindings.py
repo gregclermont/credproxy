@@ -374,7 +374,8 @@ def _array_depth_delta(line: str) -> int:
     return depth
 
 
-def _block_spans(text: str) -> list[tuple[int, int]]:
+def _block_spans(text: str, header_re: re.Pattern = _BLOCK_HEADER_RE,
+                 child_re: re.Pattern | None = None) -> list[tuple[int, int]]:
     """Index the `[[binding]]` blocks in `text` by line range [start, end)
     (end exclusive), where `start` is the header line and the block runs to
     the next table header or EOF. Trailing blank lines stay OUTSIDE the block
@@ -384,19 +385,27 @@ def _block_spans(text: str) -> list[tuple[int, int]]:
     `hosts = [ ... ]`) is never split mid-value and a `[`-led array line is never
     mistaken for a table header. The returned spans are 1:1 with the `[[binding]]`
     tables tomllib parses, in file order -- materialize/remove index into them by
-    binding position, so a miscount would edit the wrong block."""
+    binding position, so a miscount would edit the wrong block.
+
+    `header_re` selects which array-of-tables to index (default `[[binding]]`);
+    the rules layer passes its own `[[rule]]` header regex to reuse this
+    array-depth-aware machinery verbatim. `child_re` (e.g. `[rule.headers]`)
+    matches a sub-table header that BELONGS to the current element and so must be
+    folded INTO its span rather than ending it -- otherwise removing the block
+    would orphan the child table and corrupt the file."""
     lines = text.splitlines(keepends=True)
     spans: list[tuple[int, int]] = []
     i = 0
     n = len(lines)
     depth = 0  # unclosed array brackets carried across lines (multi-line arrays)
     while i < n:
-        if depth == 0 and _BLOCK_HEADER_RE.match(lines[i]):
+        if depth == 0 and header_re.match(lines[i]):
             start = i
             depth = max(0, depth + _array_depth_delta(lines[i]))
             j = i + 1
             while j < n:
-                if depth == 0 and _TABLE_HEADER_RE.match(lines[j]):
+                if depth == 0 and _TABLE_HEADER_RE.match(lines[j]) \
+                        and not (child_re is not None and child_re.match(lines[j])):
                     break
                 depth = max(0, depth + _array_depth_delta(lines[j]))
                 j += 1
@@ -449,16 +458,27 @@ def _toml_key(key: str) -> str:
     return key if _BARE_KEY_RE.match(key) else _toml_str(key)
 
 
-def _insert_line_in_block(text: str, block_index: int, line: str) -> str:
-    """Append `line` (no trailing newline) at the end of the block-index'th
-    `[[binding]]` block, preserving everything else verbatim."""
+def _insert_line_in_block(text: str, block_index: int, line: str,
+                          header_re: re.Pattern = _BLOCK_HEADER_RE,
+                          child_re: re.Pattern | None = None) -> str:
+    """Insert `line` (a scalar key, no trailing newline) into the block-index'th
+    `[[binding]]` block, preserving everything else verbatim. When `child_re` is
+    given, the line lands BEFORE the first child sub-table (`[binding.x]`) in the
+    block -- a scalar key after a sub-table header would belong to that sub-table,
+    not the array element."""
     lines = text.splitlines(keepends=True)
-    spans = _block_spans(text)
-    _start, end = spans[block_index]
+    spans = _block_spans(text, header_re, child_re)
+    start, end = spans[block_index]
+    at = end
+    if child_re is not None:
+        for k in range(start + 1, end):
+            if child_re.match(lines[k]):
+                at = k
+                break
     # Ensure the line before insertion ends with a newline.
-    if end > 0 and not lines[end - 1].endswith("\n"):
-        lines[end - 1] = lines[end - 1] + "\n"
-    lines.insert(end, line + "\n")
+    if at > 0 and not lines[at - 1].endswith("\n"):
+        lines[at - 1] = lines[at - 1] + "\n"
+    lines.insert(at, line + "\n")
     return "".join(lines)
 
 
@@ -692,6 +712,16 @@ def config_fingerprint(bindings: list[Binding]) -> str:
     that with an explicit re-push (`enter --push` / `apply`)."""
     import hashlib
 
+    blob = json.dumps(_fingerprint_items(bindings), sort_keys=True,
+                      separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _fingerprint_items(bindings: list[Binding]) -> list[dict]:
+    """The per-binding wire-metadata dicts hashed by `config_fingerprint`.
+    Exposed so the rules layer can fold bindings + rules into one combined
+    fingerprint (see core/rules.combined_fingerprint) without duplicating the
+    field selection."""
     items = []
     for b in sorted(bindings, key=lambda x: x.name or ""):
         injector = find_injector(b.injector)
@@ -720,8 +750,7 @@ def config_fingerprint(bindings: list[Binding]) -> str:
             entry["location_kind"] = spec.location_kind
             entry["header_default"] = spec.header_default
         items.append(entry)
-    blob = json.dumps(items, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(blob.encode()).hexdigest()
+    return items
 
 
 def wire_config(

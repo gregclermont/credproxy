@@ -87,32 +87,37 @@ def wait_for_ready(http_port: int, timeout: float = 15.0) -> None:
 
 
 def push_config(ws: Workspace, http_port: int, notify: Notify = _noop,
-                bindings=None, fingerprint=None):
-    """Materialize bindings, fetch each secret from its provider, and POST
-    the resulting wire config (plus a metadata `fingerprint`) to /admin/config.
+                bindings=None, rules=None, fingerprint=None):
+    """Materialize bindings + rules, fetch each secret from its provider, and
+    POST the resulting wire config (bindings + rules + a metadata `fingerprint`)
+    to /admin/config.
 
-    `bindings`/`fingerprint` may be supplied by the caller (the start path
-    computes them to decide whether a push is even needed); otherwise they are
-    materialized/computed here. Materialization may rewrite the config file
+    `bindings`/`rules`/`fingerprint` may be supplied by the caller (the start
+    path computes them to decide whether a push is even needed); otherwise they
+    are materialized/computed here. Materialization may rewrite the config file
     (filling generated names/placeholders); announced via `notify`.
 
-    Returns the list of materialized Binding instances so the caller can
-    record applied-bindings.json."""
-    from .bindings import config_fingerprint
+    Returns `(bindings, rules)` (the materialized instances) so the caller can
+    record applied-bindings.json / applied-rules.json."""
+    from .rules import (combined_fingerprint, materialize_rules,
+                        rule_wire_entries)
 
     token = read_token(ws)
     if bindings is None:
         bindings = materialize_bindings(ws, notify)
+    if rules is None:
+        rules = materialize_rules(ws, notify)
     if fingerprint is None:
-        fingerprint = config_fingerprint(bindings)
+        fingerprint = combined_fingerprint(bindings, rules)
     wire = wire_config(bindings)
+    wire["rules"] = rule_wire_entries(rules)
     wire["fingerprint"] = fingerprint
     body = json.dumps(wire).encode()
     status, payload = _http_post_json(
         f"http://127.0.0.1:{http_port}/admin/config", body, token
     )
     if status == 200:
-        return bindings
+        return bindings, rules
     if status == 401:
         raise ProxyError(
             f"proxy rejected the token (HTTP 401); check {ws.token_path}"

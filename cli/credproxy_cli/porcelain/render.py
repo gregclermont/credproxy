@@ -244,6 +244,15 @@ class Renderer:
                 )
         else:
             print("bindings    none")
+        if data.get("rules"):
+            print(f"rules       {len(data['rules'])}")
+            for r in data["rules"]:
+                scope = ",".join(r["hosts"])
+                m = "/".join(r["methods"]) if r.get("methods") else "*"
+                p = r.get("path") or "*"
+                act = r["action"] + (f":{r['script']}" if r.get("script") else "")
+                vis = "" if r["visible"] else "  [hidden]"
+                print(f"  - {r['name']}: {m} {scope}{p}  -> {act}{vis}")
         # Drift section.
         drift = data.get("drift", {})
         running = data.get("_running", False)
@@ -333,6 +342,54 @@ class Renderer:
                 )
             else:
                 print(f"FAIL  {r['name']}  (provider {r['provider']}): {r['error']}")
+
+    # -- rule add / remove / list / test --
+    def rule_added(self, name: str, ws: str, r: dict) -> None:
+        print(f"added rule '{name}' to workspace '{ws}'")
+        print(f"  hosts    {', '.join(r['hosts'])}")
+        if r.get("methods"):
+            print(f"  methods  {', '.join(r['methods'])}")
+        if r.get("path"):
+            print(f"  path     {r['path']}")
+        print(f"  action   {r['action']}"
+              + (f" ({r['script']})" if r.get("script") else ""))
+        vis = "visible" if r["visible"] else "hidden (not enumerated to the workspace)"
+        print(f"  {vis}")
+        say(f"run `credproxy workspace {ws} start` (or `apply`) to push it to the proxy")
+
+    def rule_removed(self, name: str, ws: str) -> None:
+        print(f"removed rule '{name}' from workspace '{ws}'")
+
+    def rule_list(self, ws: str, rows: list[dict]) -> None:
+        if not rows:
+            print(f"no rules in workspace '{ws}'")
+            return
+        header = ("NAME", "HOSTS", "METHODS", "PATH", "ACTION", "VISIBILITY")
+        table = [header]
+        for r in rows:
+            table.append((
+                r["name"], ",".join(r["hosts"]),
+                ",".join(r["methods"]) if r.get("methods") else "*",
+                r.get("path") or "*",
+                r["action"] + (f":{r['script']}" if r.get("script") else ""),
+                "visible" if r["visible"] else "HIDDEN",
+            ))
+        widths = [max(len(row[i]) for row in table) for i in range(len(header))]
+        for row in table:
+            print("  ".join(f"{row[i]:<{widths[i]}}" for i in range(len(header))).rstrip())
+
+    def rule_test(self, method: str, url: str, matches: list[dict]) -> None:
+        if not matches:
+            print(f"no rule matches {method} {url}")
+            return
+        for m in matches:
+            detail = m["action"]
+            if m.get("script"):
+                detail = f"script:{m['script']} (may block/respond/rewrite)"
+            elif m["action"] in ("block", "respond") and m.get("status"):
+                detail = f"{m['action']} {m['status']}"
+            vis = "" if m["visible"] else "  [hidden]"
+            print(f"matched: {m['name']} → {detail}{vis}")
 
     # -- injector / provider list --
     def def_list(self, kind: str, rows: list[dict]) -> None:
@@ -498,6 +555,18 @@ class JsonRenderer(Renderer):
 
     def binding_test(self, results: list[dict]) -> None:
         self._emit(results)
+
+    def rule_added(self, name: str, ws: str, r: dict) -> None:
+        self._emit({"workspace": ws, "rule": r})
+
+    def rule_removed(self, name: str, ws: str) -> None:
+        self._emit({"workspace": ws, "removed": name})
+
+    def rule_list(self, ws: str, rows: list[dict]) -> None:
+        self._emit({"workspace": ws, "rules": rows})
+
+    def rule_test(self, method: str, url: str, matches: list[dict]) -> None:
+        self._emit({"method": method, "url": url, "matches": matches})
 
     def def_list(self, kind: str, rows: list[dict]) -> None:
         self._emit(rows)

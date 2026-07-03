@@ -1,13 +1,15 @@
-"""Host-pattern validation, mirrored from the proxy's proxy/hostmatch.py.
+"""Host-pattern validation + compilation, mirrored from proxy/hostmatch.py.
 
 A binding's `hosts` entry is either a literal hostname or a glob pattern
 containing `*` (`*.amazonaws.com` scopes a binding to every AWS region/service
-endpoint). The proxy compiles and matches patterns at request time; the CLI
-only needs to *validate* them, so a bad pattern is rejected at `binding add`
-rather than only when the proxy validates the pushed config. Keep the rules
-here in sync with proxy/hostmatch.py.
+endpoint). Bindings only need to *validate* a pattern on the CLI (matching
+happens in the proxy at request time), but `rule test` DOES match host globs on
+the host to answer "which rule fires?", so `compile_pattern` is mirrored too.
+Keep the rules here in sync with proxy/hostmatch.py.
 """
 from __future__ import annotations
+
+import re
 
 
 def is_pattern(host: str) -> bool:
@@ -39,3 +41,11 @@ def validate_pattern(host: str) -> str | None:
             f"'*.com')"
         )
     return None
+
+
+def compile_pattern(host: str) -> re.Pattern:
+    """Compile a glob pattern to a full-match, case-insensitive regex (mirrors
+    proxy/hostmatch.py.compile_pattern). `*` -> `.*`; every other char literal.
+    Assumes `host` already passed `validate_pattern`."""
+    rx = re.escape(host).replace(r"\*", ".*")
+    return re.compile(rx, re.IGNORECASE)

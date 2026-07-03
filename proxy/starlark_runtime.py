@@ -400,6 +400,21 @@ def _now_ms():
     return int(time.time() * 1000)
 
 
+# -- rule terminal sinks (kind="rule" only). They record a synthetic response on
+#    the implicit ctx (a rules.RuleRequestCtx/RuleResponseCtx); the addon reads
+#    `ctx.pending` and short-circuits. A rule script has no secret to protect, so
+#    these are plain and their failures surface fully. --
+def _block(status=403, reason=None):
+    """Terminate the flow with a policy block (status, default 403)."""
+    _ctx().block(int(status), reason)
+
+
+def _respond(status, body="", headers=None):
+    """Terminate the flow with an author-supplied response (status, body,
+    headers)."""
+    _ctx().respond(int(status), body, headers)
+
+
 PRIMITIVES = {
     # credential / binding
     "secret": _secret,
@@ -448,7 +463,56 @@ PRIMITIVES = {
 }
 
 
+# The restricted primitive set for kind="rule" scripts. A rule governs traffic
+# but never touches a credential, so this profile OMITS every secret-bearing and
+# crypto/carrier primitive (see FORBIDDEN_RULE_PRIMITIVES) and ADDS the terminal
+# `block`/`respond` sinks. Because a rule script physically cannot reach secret
+# material, its errors are NOT sanitized (unlike injector scripts) -- a real
+# authoring-UX win (#26).
+_RULE_PRIMITIVE_NAMES = (
+    # request metadata (both phases) + content reads + mutation
+    "req_method", "req_path", "req_host",
+    "req_header", "req_body", "req_body_b64",
+    "req_set_header", "req_set_body",
+    # response reads + mutation
+    "resp_status", "resp_header", "resp_set_header",
+    "resp_body", "resp_set_body", "resp_json",
+    # inert encoding + json + time + read-only jwt claims inspection
+    "b64encode", "b64decode", "b64url_encode", "b64url_decode",
+    "json_encode", "json_decode", "now", "now_ms", "jwt_decode_or_none",
+)
+
+RULE_PRIMITIVES = {
+    **{name: PRIMITIVES[name] for name in _RULE_PRIMITIVE_NAMES},
+    # terminal sinks (rule-only)
+    "block": _block,
+    "respond": _respond,
+}
+
+# Names a rule script may NOT reference. Enforced at COMPILE time via a source
+# scan (see ScriptedScheme) so the author gets a clear, specific message rather
+# than an "undefined: secret" at first request. Covers the credential door
+# (`secret`), the re-seal mints, and the crypto/carrier primitives.
+FORBIDDEN_RULE_PRIMITIVES = frozenset({
+    "secret", "mint", "mint_into_json",
+    "hmac_sha256", "hmac_sha256_hex", "sha256_hex", "sha1_hex",
+    "rs256_sign", "jwt_encode_sign", "b64_to_hex", "hex_to_b64",
+})
+
+
+def _forbidden_rule_reference(source: str) -> str | None:
+    """Return the first forbidden primitive a rule script references, else None.
+    A word-boundary scan: a rule that names a local `secret` is rejected too,
+    which is fine -- the point is that credential-bearing primitives are simply
+    inexpressible in a rule script."""
+    for name in sorted(FORBIDDEN_RULE_PRIMITIVES):
+        if re.search(rf"(?<![\w.]){re.escape(name)}\s*\(", source):
+            return name
+    return None
+
+
 _HAS_ON_RESPONSE = re.compile(r"(?m)^def[ \t]+on_response\b")
+_HAS_ON_REQUEST = re.compile(r"(?m)^def[ \t]+on_request\b")
 
 
 class ScriptResponseError(Exception):
@@ -472,6 +536,7 @@ class ScriptedScheme:
         name: str,
         source: str,
         *,
+        kind: str = "inject",
         family: str = "substitute",
         slots: tuple[str, ...] = ("value",),
         location_kind: str = "header",
@@ -480,6 +545,10 @@ class ScriptedScheme:
         filename: str | None = None,
     ):
         self.name = name
+        # kind="inject" -> a scripted injection scheme (full primitives, secret
+        # access, sanitized errors). kind="rule" -> a traffic-governance rule
+        # (restricted primitives, no secret, block/respond sinks, FULL errors).
+        self.kind = kind
         self.family = family
         self.slots = tuple(slots)
         self.location_kind = location_kind
@@ -488,9 +557,25 @@ class ScriptedScheme:
         # path supports check_cancelled (see module docstring).
         self._timeout = timeout
         self._has_on_response = bool(_HAS_ON_RESPONSE.search(source))
+        self._has_on_request = bool(_HAS_ON_REQUEST.search(source))
+
+        if kind == "rule":
+            forbidden = _forbidden_rule_reference(source)
+            if forbidden is not None:
+                raise ValueError(
+                    f"rule script may not use '{forbidden}()': a rule governs "
+                    f"traffic but can never touch credential material (the "
+                    f"secret/mint/crypto primitives are unavailable in rule "
+                    f"scripts)")
+            if not _HAS_ON_REQUEST.search(source) and not self._has_on_response:
+                raise ValueError(
+                    "rule script defines neither on_request() nor on_response()")
+            primitives = RULE_PRIMITIVES
+        else:
+            primitives = PRIMITIVES
 
         module = starlark.Module()
-        for prim_name, fn in PRIMITIVES.items():
+        for prim_name, fn in primitives.items():
             module.add_callable(prim_name, fn)
         ast = starlark.parse(filename or f"{name}.star", source)
         # No file_loader -> load() is rejected; standard globals only.
@@ -503,12 +588,36 @@ class ScriptedScheme:
         # error the addon must withhold the (possibly token-bearing) response.
         return self._has_on_response
 
+    @property
+    def has_on_request(self) -> bool:
+        """Whether the script defines on_request (used by the rules layer to
+        decide if a scripted rule runs in the request phase)."""
+        return self._has_on_request
+
+    @property
+    def has_on_response(self) -> bool:
+        """Whether the script defines on_response (used by the rules layer to
+        decide if a scripted rule runs in the response phase)."""
+        return self._has_on_response
+
     def on_request(self, ctx) -> bool:
+        if self.kind == "rule":
+            # A response-only rule has no request-phase effect: no-op rather than
+            # calling a non-exported symbol.
+            if not self._has_on_request:
+                return False
+            # A rule holds no secret, so a failing hook is surfaced in full and
+            # RAISES so the addon fails closed toward the policy (a 502).
+            return self._invoke("on_request", ctx, raise_on_error=True,
+                                 sanitize=False)
         return self._invoke("on_request", ctx)
 
     def on_response(self, ctx) -> bool:
         if not self._has_on_response:
             return False
+        if self.kind == "rule":
+            return self._invoke("on_response", ctx, raise_on_error=True,
+                                 sanitize=False)
         # Response-phase failure must NOT forward the (possibly token-bearing)
         # response: raise so the addon fails closed. (on_request failure is safe
         # to swallow -- the request just proceeds un-injected.)
@@ -521,7 +630,8 @@ class ScriptedScheme:
         hosts = params.get("api_hosts") or []
         return [h for h in hosts if isinstance(h, str) and h]
 
-    def _invoke(self, fn_name: str, ctx, raise_on_error: bool = False) -> bool:
+    def _invoke(self, fn_name: str, ctx, raise_on_error: bool = False,
+                sanitize: bool = True) -> bool:
         """Run the script hook. Binds `ctx` to the contextvar for the duration of
         the call so the flat primitives can reach it, then always unbinds. When
         the call path supports check_cancelled, a wall-clock deadline aborts a
@@ -547,8 +657,15 @@ class ScriptedScheme:
                 else:
                     result = self._frozen.call(fn_name)
             except Exception as e:  # StarlarkError / primitive error / deadline abort
-                reason = ("deadline" if cancel is not None and cancel.fired
-                          else type(e).__name__)
+                timed_out = cancel is not None and cancel.fired
+                if not sanitize:
+                    # Rule scripts hold no secret, so the FULL message is safe to
+                    # surface -- a real authoring-UX win (#26). Raise so the addon
+                    # fails closed toward the policy.
+                    reason = "deadline exceeded" if timed_out else str(e)
+                    raise RuntimeError(
+                        f"{self.name}.{fn_name} failed: {reason}") from e
+                reason = "deadline" if timed_out else type(e).__name__
                 if raise_on_error:
                     # `from None`: drop the chained cause so its (secret-bearing)
                     # message can't surface in a traceback the addon logs.

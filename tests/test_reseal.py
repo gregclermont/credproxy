@@ -350,6 +350,10 @@ class _OneTransform:
     def inward_bindings(self):
         return []
 
+    def rule_set(self):
+        import rules
+        return rules.RuleSet()
+
     def register_runtime(self, host, transform, ttl=None):
         pass
 

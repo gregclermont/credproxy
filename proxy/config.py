@@ -57,7 +57,9 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import hostmatch
+import rules as rules_mod
 import schemes
+from rules import Rule, RuleSet
 from schemes import Scheme
 
 _SECRET_REF = re.compile(r"\$\{secret:([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -91,6 +93,7 @@ class Credentials(Protocol):
     def intercept_hosts(self) -> set[str]: ...
     def transforms_for(self, host: str) -> list[Transform]: ...
     def inward_bindings(self) -> list[InwardBinding]: ...
+    def rule_set(self) -> RuleSet: ...
 
 
 class BindingCredentials:
@@ -108,9 +111,13 @@ class BindingCredentials:
         hosts: dict[str, list[Transform]],
         bindings: list[InwardBinding] | None = None,
         patterns: list[tuple[str, "re.Pattern", Transform]] | None = None,
+        rules: RuleSet | None = None,
         clock=time.monotonic,
     ):
         self._hosts = hosts
+        # The rules layer (traffic governance). Its host set joins the intercept
+        # UNION below, so a host with only rules is still TLS-terminated.
+        self._rules = rules if rules is not None else RuleSet()
         # Glob-pattern layer (hostmatch): (pattern_str, compiled_regex,
         # Transform), in config order. Scanned linearly after the literal dict
         # hit, so a request matching several patterns applies them in config
@@ -136,11 +143,19 @@ class BindingCredentials:
             return True
         if any(rx.fullmatch(sni) for (_, rx, _) in self._patterns):
             return True
+        # Intercept UNION: a rule-only host (no binding) must still be terminated,
+        # or the proxy never sees the request the rule governs.
+        if self._rules.intercepts(sni):
+            return True
         return bool(self._live(sni))
 
     def intercept_hosts(self) -> set[str]:
         live = {h for h in list(self._runtime) if self._live(h)}
-        return set(self._hosts) | {p for (p, _, _) in self._patterns} | live
+        return (set(self._hosts) | {p for (p, _, _) in self._patterns}
+                | self._rules.intercept_hosts() | live)
+
+    def rule_set(self) -> RuleSet:
+        return self._rules
 
     def transforms_for(self, host: str) -> list[Transform]:
         host = host.lower()               # DNS hostnames are case-insensitive
@@ -288,6 +303,222 @@ def _build_scripted_scheme(entry: dict, source: str, where: str):
         )
     except Exception as e:
         _fail(f"{source}: {where} script '{name}' failed to compile: {e}")
+
+
+# Fields allowed on a rule, keyed by action. `_COMMON_RULE_FIELDS` are always
+# allowed; anything else on an entry is a validation error (400-with-path), so a
+# misplaced param (a `body` on a `block`, a `set_headers` on a `respond`) is
+# caught at push rather than silently ignored.
+_COMMON_RULE_FIELDS = frozenset({"name", "hosts", "methods", "path", "action",
+                                 "visible"})
+_RULE_ACTION_FIELDS = {
+    "block": frozenset({"status"}),
+    "respond": frozenset({"status", "body", "headers"}),
+    "rewrite": frozenset({"set_headers", "remove_headers",
+                          "resp_set_headers", "resp_remove_headers"}),
+    "script": frozenset({"script", "script_source", "api"}),
+}
+# Per-family default for the `visible` flag when omitted: terminal actions are
+# diagnosable-by-default (attributed + enumerated); rewrite/script default hidden
+# (they emit no attribution anyway and enumeration usually leaks what's hidden).
+_VISIBLE_DEFAULT = {"block": True, "respond": True, "rewrite": False,
+                    "script": False}
+
+
+def _str_map(value, source: str, where: str) -> dict:
+    """Validate a header map (str -> str, both non-empty). Header NAMES may be
+    empty-checked; values may be empty strings? We require non-empty names but
+    allow empty values (a header set to '')."""
+    if not isinstance(value, dict):
+        _fail(f"{source}: {where} must be an object of string->string")
+    for k, v in value.items():
+        if not isinstance(k, str) or not k:
+            _fail(f"{source}: {where} has a non-string or empty header name")
+        if not isinstance(v, str):
+            _fail(f"{source}: {where}['{k}'] must be a string")
+    return dict(value)
+
+
+def _str_list(value, source: str, where: str) -> tuple:
+    if not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
+        _fail(f"{source}: {where} must be an array of non-empty strings")
+    return tuple(value)
+
+
+def _build_rule_scheme(entry: dict, source: str, where: str):
+    """Compile a pushed rule `.star` source into a kind='rule' ScriptedScheme.
+
+    Mirrors _build_scripted_scheme, but the rule profile is restricted (no
+    secret/mint/crypto) and its errors are unsanitized. Returns (scheme, name).
+    """
+    src = entry.get("script_source")
+    if not isinstance(src, str) or not src:
+        _fail(f"{source}: {where} action 'script' needs a non-empty 'script_source'")
+    name = entry.get("script")
+    if not isinstance(name, str) or not name:
+        name = "rule"
+    api = entry.get("api", 1)
+    if not isinstance(api, int) or isinstance(api, bool):
+        _fail(f"{source}: {where}.api must be an integer")
+    try:
+        from starlark_runtime import SUPPORTED_API_VERSIONS, ScriptedScheme
+    except Exception as e:  # pragma: no cover - starlark always present in proxy
+        _fail(f"{source}: scripted rules require the starlark runtime ({e})")
+    if api not in SUPPORTED_API_VERSIONS:
+        _fail(f"{source}: {where} rule script '{name}' declares api version {api}, "
+              f"unsupported by this proxy (implements "
+              f"{', '.join(str(v) for v in sorted(SUPPORTED_API_VERSIONS))})")
+    try:
+        return ScriptedScheme(name, src, kind="rule"), name
+    except Exception as e:
+        # Safe to surface: a rule script holds no secret at compile OR run time.
+        _fail(f"{source}: {where} rule script '{name}' failed to compile: {e}")
+
+
+def _load_rules(raw_rules, source: str) -> RuleSet:
+    """Validate the `rules` array and compile it into a RuleSet. Same
+    400-with-path rigor as bindings: unknown action, misplaced/missing param,
+    bad host/path glob, unknown-version or uncompilable script each fail here."""
+    if not isinstance(raw_rules, list):
+        _fail(f"{source}: `rules` must be an array")
+
+    names_seen: set[str] = set()
+    compiled: list[Rule] = []
+    for i, entry in enumerate(raw_rules):
+        where = f"rules[{i}]"
+        if not isinstance(entry, dict):
+            _fail(f"{source}: {where} must be an object")
+
+        # --- name ---
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            _fail(f"{source}: {where}.name must be a non-empty string")
+        if name in names_seen:
+            _fail(f"{source}: duplicate rule name '{name}'")
+        names_seen.add(name)
+
+        # --- action (validated first: it gates the allowed field set) ---
+        action = entry.get("action")
+        if action not in rules_mod.ACTIONS:
+            _fail(f"{source}: {where}.action must be one of "
+                  f"{', '.join(rules_mod.ACTIONS)} (got {action!r})")
+        allowed = _COMMON_RULE_FIELDS | _RULE_ACTION_FIELDS[action]
+        extra = set(entry) - allowed
+        if extra:
+            _fail(f"{source}: {where} has field(s) not valid for action "
+                  f"'{action}': {', '.join(sorted(extra))}")
+
+        # --- hosts (literals + globs) ---
+        rhosts = entry.get("hosts")
+        if not isinstance(rhosts, list) or not rhosts \
+                or not all(isinstance(h, str) and h for h in rhosts):
+            _fail(f"{source}: {where}.hosts must be a non-empty array of strings")
+        host_literals = set()
+        host_patterns = []
+        for h in rhosts:
+            if hostmatch.is_pattern(h):
+                err = hostmatch.validate_pattern(h)
+                if err:
+                    _fail(f"{source}: {where}.hosts: {err}")
+                host_patterns.append(hostmatch.compile_pattern(h.lower()))
+            else:
+                host_literals.add(h.lower())
+
+        # --- methods (optional; absent = all, but an EMPTY list would match no
+        #     method -> a silent dead rule, so reject it) ---
+        methods = entry.get("methods")
+        if methods is None:
+            method_set = None
+        else:
+            method_list = _str_list(methods, source, f"{where}.methods")
+            if not method_list:
+                _fail(f"{source}: {where}.methods must be a non-empty array "
+                      f"(omit it entirely to match all methods)")
+            method_set = frozenset(m.upper() for m in method_list)
+
+        # --- path (optional) ---
+        path = entry.get("path")
+        if path is None:
+            path_rx = None
+        else:
+            if not isinstance(path, str):
+                _fail(f"{source}: {where}.path must be a string")
+            perr = rules_mod.validate_path(path)
+            if perr:
+                _fail(f"{source}: {where}.path: {perr}")
+            path_rx = rules_mod.compile_path(path)
+
+        # --- visible (optional; per-family default) ---
+        visible = entry.get("visible")
+        if visible is None:
+            visible = _VISIBLE_DEFAULT[action]
+        elif not isinstance(visible, bool):
+            _fail(f"{source}: {where}.visible must be a boolean")
+
+        kwargs = {}
+        scheme = None
+        script_name = None
+        if action == "block":
+            kwargs["status"] = _rule_status(entry, source, where, default=403)
+        elif action == "respond":
+            status = entry.get("status")
+            if status is None:
+                _fail(f"{source}: {where} action 'respond' requires a 'status'")
+            kwargs["status"] = _rule_status(entry, source, where, default=None)
+            body = entry.get("body")
+            if body is not None and not isinstance(body, str):
+                _fail(f"{source}: {where}.body must be a string")
+            kwargs["body"] = body
+            headers = entry.get("headers")
+            kwargs["headers"] = (_str_map(headers, source, f"{where}.headers")
+                                 if headers is not None else None)
+        elif action == "rewrite":
+            sh = entry.get("set_headers")
+            rh = entry.get("remove_headers")
+            rsh = entry.get("resp_set_headers")
+            rrh = entry.get("resp_remove_headers")
+            if sh is None and rh is None and rsh is None and rrh is None:
+                _fail(f"{source}: {where} action 'rewrite' needs at least one of "
+                      f"set_headers/remove_headers/resp_set_headers/"
+                      f"resp_remove_headers")
+            kwargs["set_headers"] = (_str_map(sh, source, f"{where}.set_headers")
+                                     if sh is not None else None)
+            kwargs["remove_headers"] = (_str_list(rh, source, f"{where}.remove_headers")
+                                        if rh is not None else None)
+            kwargs["resp_set_headers"] = (_str_map(rsh, source, f"{where}.resp_set_headers")
+                                          if rsh is not None else None)
+            kwargs["resp_remove_headers"] = (_str_list(rrh, source, f"{where}.resp_remove_headers")
+                                             if rrh is not None else None)
+        elif action == "script":
+            scheme, script_name = _build_rule_scheme(entry, source, where)
+
+        compiled.append(Rule(
+            name=name,
+            hosts=tuple(rhosts),
+            host_literals=frozenset(host_literals),
+            host_patterns=tuple(host_patterns),
+            methods=method_set,
+            path_glob=path,
+            path_rx=path_rx,
+            action=action,
+            visible=visible,
+            scheme=scheme,
+            script_name=script_name,
+            **kwargs,
+        ))
+
+    return RuleSet(compiled)
+
+
+def _rule_status(entry: dict, source: str, where: str, default):
+    status = entry.get("status", default)
+    if status is default and default is not None:
+        return default
+    if not isinstance(status, int) or isinstance(status, bool) \
+            or not (100 <= status <= 599):
+        _fail(f"{source}: {where}.status must be an integer HTTP status "
+              f"(100-599), got {status!r}")
+    return status
 
 
 def _check_unresolved(value: str, source: str, where: str) -> None:
@@ -517,4 +748,8 @@ def load_resolved(raw: Any, source: str = "<resolved>") -> BindingCredentials:
             hosts=list(binding_hosts),
         ))
 
-    return BindingCredentials(hosts, inward, patterns)
+    # Rules ride the same wire config next to bindings (optional array). Their
+    # host set joins the intercept union in BindingCredentials.
+    rule_set = _load_rules(raw.get("rules", []), source)
+
+    return BindingCredentials(hosts, inward, patterns, rules=rule_set)

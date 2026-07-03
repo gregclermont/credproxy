@@ -36,6 +36,10 @@ class FakeCreds:
     def inward_bindings(self) -> list:
         return []
 
+    def rule_set(self):
+        import rules
+        return rules.RuleSet()
+
 
 def make_state(hosts):
     """HostnameLogger reads `state.creds` fresh on each call; tests mimic that

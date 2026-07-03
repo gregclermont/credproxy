@@ -102,6 +102,9 @@ def _state(hosts):
         def intercept_hosts(self): return set(self._h)
         def transforms_for(self, host): return list(self._h.get(host, []))
         def inward_bindings(self): return []
+        def rule_set(self):
+            import rules
+            return rules.RuleSet()
     return SimpleNamespace(creds=Creds(hosts))
 
 

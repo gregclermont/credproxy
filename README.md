@@ -43,5 +43,6 @@ Both surfaces share the same core; `--json` is available on either for machine-r
 - `docs/configuration.md` — workspace config: the TOML file format and the CLI that edits it
 - `docs/workspace.md` — netns constraints, bootstrap guide, egress shape
 - `docs/injectors.md` — injector TOML format (how a credential is shaped into a request)
+- `docs/rules.md` — rules: block/stub/rewrite/script traffic on intercepted hosts (a credential-free guardrail; e.g. block `DELETE /repos/**`), with optional hidden rules as tripwires
 - `docs/providers.md` — provider exec protocol (writing your own backend)
 - `CLAUDE.md` — architecture guide for working on credproxy itself

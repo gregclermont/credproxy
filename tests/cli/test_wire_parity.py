@@ -66,3 +66,41 @@ def test_proxy_validator_is_not_a_noop(xdg):
     proxy_config = _proxy_config()
     with pytest.raises(Exception):
         proxy_config.load_resolved({"bindings": [{"name": "x"}]})  # missing fields
+
+
+def test_pathmatch_parity():
+    """The CLI's pathmatch mirror must translate path globs byte-for-byte like
+    the proxy's, or `rule test` disagrees with the real matcher."""
+    from credproxy_cli.core import pathmatch as cli_pathmatch
+    proxy_dir = str(Path(__file__).resolve().parents[2] / "proxy")
+    if proxy_dir not in sys.path:
+        sys.path.insert(0, proxy_dir)
+    import rules as proxy_rules
+    for glob in ["/repos/**", "/v1/models", "/users/*/repos", "/a", "/x/**/y",
+                 "/p.a-t_h/*", "/"]:
+        assert cli_pathmatch.path_to_regex(glob) == proxy_rules.path_to_regex(glob)
+        assert cli_pathmatch.validate_path(glob) == proxy_rules.validate_path(glob)
+
+
+def test_rule_wire_config_round_trips_through_proxy(xdg):
+    """Declarative rule wire entries the CLI emits must be accepted by the proxy
+    validator (script rules need the Starlark runtime, covered in-image)."""
+    from credproxy_cli.core.rules import Rule, rule_wire_entries
+    proxy_config = _proxy_config()
+
+    rules = [
+        Rule(name="blk", hosts=("api.github.com",), action="block",
+             methods=("DELETE",), path="/repos/**"),
+        Rule(name="stub", hosts=("api.openai.com",), action="respond",
+             path="/v1/models", status=200, body="{}",
+             headers={"Content-Type": "application/json"}),
+        Rule(name="rw", hosts=("api.example.com",), action="rewrite",
+             set_headers={"X-Env": "sandbox"}, remove_headers=("X-Id",)),
+    ]
+    wire = {"bindings": [], "rules": rule_wire_entries(rules)}
+    try:
+        creds = proxy_config.load_resolved(wire)
+    except Exception as e:  # noqa: BLE001
+        pytest.fail(f"rule wire config rejected by proxy load_resolved: "
+                    f"{type(e).__name__}: {e}")
+    assert {r.name for r in creds.rule_set().all()} == {"blk", "stub", "rw"}

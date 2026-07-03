@@ -117,6 +117,10 @@ You will never see the real credential value -- the proxy holds it.
 A request to an intercepted host with no matching placeholder is forwarded
 as-is and logged.
 
+Responses on intercepted hosts may be modified or refused by policy; listed
+rules (in /setup's `rules` array) are not necessarily exhaustive. A refused
+request may return a synthetic status/body rather than the upstream's.
+
 If proxy.local does not resolve, use 169.254.1.1 directly.
 
 Endpoints (all GET):
@@ -124,7 +128,7 @@ Endpoints (all GET):
   /ca.crt        CA certificate (PEM)
   /bootstrap.sh  one-shot setup: install CA + write /etc/profile.d
   /env.sh        env-var exports only (for `eval` use)
-  /setup         JSON: ca_url, env, version, intercept_hosts, bindings
+  /setup         JSON: ca_url, env, version, intercept_hosts, bindings, rules
   /llms.txt      this file
 """
 
@@ -186,6 +190,11 @@ async def setup(request: web.Request) -> web.Response:
         "env": CA_ENV,
         "intercept_hosts": sorted(state.creds.intercept_hosts()),
         "bindings": workspace_bindings(state.creds),
+        # Least disclosure: only VISIBLE rules are enumerated (name, hosts,
+        # methods, path, action -- never script source or rewrite values); hidden
+        # rules are excluded entirely. The /llms.txt sentence keeps the workspace
+        # honest-in-general that the list may not be exhaustive.
+        "rules": state.creds.rule_set().inward_rules(),
     })
 
 
