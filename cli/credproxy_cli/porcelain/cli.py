@@ -792,7 +792,10 @@ def do_binding_list(ctx: Ctx, name: str | None) -> None:
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
-    bindings = core_bindings.materialize_bindings(ws, notify=say)
+    # Hold the lock: materialize may write back generated names/placeholders, so
+    # a concurrent add/remove must not race this read-modify-write.
+    with ws.lock():
+        bindings = core_bindings.materialize_bindings(ws, notify=say)
     rows = [
         {
             "name": b.name,
@@ -819,7 +822,10 @@ def do_binding_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
-    bindings = core_bindings.materialize_bindings(ws, notify=say)
+    # Hold the lock only for the materializing read-modify-write; the provider
+    # fetch below needs no lock (and can be slow).
+    with ws.lock():
+        bindings = core_bindings.materialize_bindings(ws, notify=say)
     if a.binding_name is not None:
         bindings = [b for b in bindings if b.name == a.binding_name]
         if not bindings:
@@ -1010,7 +1016,10 @@ def do_rule_list(ctx: Ctx, name: str | None) -> None:
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
-    rules = core_rules.materialize_rules(ws, notify=say)
+    # Hold the lock: materialize may write back generated names, so a concurrent
+    # add/remove must not race this read-modify-write.
+    with ws.lock():
+        rules = core_rules.materialize_rules(ws, notify=say)
     render.OUT.rule_list(ws.name, [_rule_row(r) for r in rules])
 
 
@@ -1026,7 +1035,9 @@ def do_rule_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     if not host:
         fail(f"'{a.url}' has no host (use a full URL, e.g. https://api.github.com/x)")
     path = parts.path or "/"
-    rules = core_rules.materialize_rules(ws, notify=say)
+    # Hold the lock only for the materializing read-modify-write.
+    with ws.lock():
+        rules = core_rules.materialize_rules(ws, notify=say)
     matches = core_rules.match_rules(rules, a.method, host, path)
     # Enrich each match with the rule's action detail (status/script) for display.
     by_name = {r.name: r for r in rules}
