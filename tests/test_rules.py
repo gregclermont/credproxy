@@ -262,6 +262,40 @@ def test_response_rewrite_after_upstream():
     assert "X-Leak" not in flow.response.headers
 
 
+# ---- [http] log-line folding (unified evaluator) ----------------------------
+
+def test_request_terminal_http_line_folds_prior_rewrite_marks(capsys):
+    # After unifying the two evaluators, a request rewrite before a block folds
+    # into ONE [http] line with both markers, in order (parity with the response
+    # phase; previously the request terminal line dropped the rewrite marker).
+    creds = _creds([
+        {"name": "rw", "hosts": ["api.github.com"], "action": "rewrite",
+         "set_headers": {"X-Env": "sandbox"}},
+        {"name": "blk", "hosts": ["api.github.com"], "action": "block"},
+    ])
+    log = addon.HostnameLogger(_state(creds))
+    log.request(_flow())
+    http_lines = [l for l in capsys.readouterr().out.splitlines()
+                  if l.startswith("[http]")]
+    assert len(http_lines) == 1
+    line = http_lines[0]
+    assert "rewrite:rw" in line and "block:blk" in line
+    assert line.index("rewrite:rw") < line.index("block:blk")
+
+
+def test_response_script_error_prints_http_line(capsys):
+    # A response-script failure now logs an [http] line (rule-error:NAME) as well
+    # as the 502 -- the response phase used to print none.
+    creds = _creds([_script_rule("boom", "def on_response():\n    fail('x')\n")])
+    log = addon.HostnameLogger(_state(creds))
+    flow = _flow(resp=True)
+    log.response(flow)
+    assert flow.response.status_code == 502
+    http_lines = [l for l in capsys.readouterr().out.splitlines()
+                  if l.startswith("[http]")]
+    assert any("rule-error:boom" in l for l in http_lines)
+
+
 # ---- scripted rules ---------------------------------------------------------
 
 _BLOCK_SCRIPT = "def on_request():\n    block(451)\n"

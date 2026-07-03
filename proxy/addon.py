@@ -20,6 +20,7 @@ The sentinel-IP path is handled by the merged HTTP listener (admin +
 bootstrap) on a separate port, so this addon never sees those flows.
 """
 import json
+from dataclasses import dataclass, field
 
 from mitmproxy import http, tls
 
@@ -28,6 +29,16 @@ import placeholders
 import rules
 from config import RuntimeMinter
 from schemes import RequestCtx, ResponseCtx
+
+
+@dataclass
+class _RulePhaseResult:
+    """Outcome of running one phase's matched rules through the shared evaluator.
+    `flow.response` and the audit stream are already handled by the evaluator;
+    the caller only does phase-specific `[http]` plumbing from these fields."""
+    terminated: bool                       # a terminal rule OR a fail-closed 502 fired
+    rewrite_marks: list = field(default_factory=list)  # non-terminal markers, in order
+    terminal_mark: str | None = None       # "block:NAME" | "respond:NAME" | "rule-error:NAME"
 
 
 class HostnameLogger:
@@ -135,36 +146,25 @@ class HostnameLogger:
 
     # ---- rule evaluation ----------------------------------------------------
 
-    def _apply_request_rules(self, flow, creds, host, method, path):
-        """Evaluate request-phase rules in declaration order (before injection).
-
-        Rewrites mutate the request in place (so injection then sees the rewritten
-        request) and are non-terminal; the first `block`/`respond` -- or a script
-        that calls one -- short-circuits: this sets `flow.response` and logs the
-        `[http]` line itself. Returns `(markers, terminated)`: `markers` are the
-        non-terminal rule markers for the caller to fold into its own `[http]`
-        line, `terminated` tells the caller to stop (skip injection). A script
-        failure fails CLOSED toward the policy (a 502, terminated)."""
-        # Rules match against the PRE-rewrite host/path: `host`/`path` are captured
-        # before any rewrite runs. That's correct today (a rewrite can't touch the
-        # request line -- only headers, and Host rewrites are rejected), but if a
-        # path-rewrite action is ever added, decide matching semantics explicitly
-        # rather than letting a rewrite silently re-target later rules.
-        rule_set = creds.rule_set()
-        matched = rule_set.request_rules(method, host, path) if rule_set else []
-        if not matched:
-            return [], False
-        rctx = rules.RuleRequestCtx(flow.request)
-        markers: list[str] = []
+    def _evaluate_rules(self, flow, matched, rctx, apply_fn, *, host, method,
+                        path) -> _RulePhaseResult:
+        """The ONE home of the rule-evaluation security invariants, shared by both
+        phases: strict declaration order, first-terminal-wins, fail-closed, and
+        the durable audit event per rule. Mutates `flow` (rewrites via `rctx`; sets
+        `flow.response` on a terminal rule or a fail-closed 502) and emits audit;
+        returns the outcome so the caller can do phase-specific `[http]` logging.
+        `apply_fn` is `rules.apply_request_rule` / `apply_response_rule`; `rctx` the
+        matching RuleRequestCtx / RuleResponseCtx."""
+        marks: list[str] = []
         for rule in matched:
             try:
-                terminal = rules.apply_request_rule(rule, rctx)
-                # Build the synthetic response INSIDE the guard: a malformed
-                # script `respond(...)` (a non-string body, a bad header value)
-                # makes _synthesize raise, and mitmproxy would SWALLOW an escaping
-                # addon exception and forward upstream un-governed. Fail closed.
+                terminal = apply_fn(rule, rctx)
+                # Build the synthetic response INSIDE the guard: a malformed script
+                # `respond(...)` (non-string body, bad header) makes _synthesize
+                # raise, and mitmproxy would SWALLOW an escaping addon exception and
+                # forward upstream un-governed. Fail closed.
                 synthetic = self._synthesize(rule, rctx.pending) if terminal else None
-            except Exception as e:  # RuleError or a synthesis failure
+            except Exception as e:  # RuleError or a synthesis failure -> fail closed
                 # Rule scripts hold no secret, so the full cause is safe to log.
                 print(f"[rule] {rule.name} failed: {e}", flush=True)
                 audit.emit("rule", rule=rule.name, action=rule.action, host=host,
@@ -172,29 +172,49 @@ class HostnameLogger:
                 flow.response = http.Response.make(
                     502, f"credproxy: rule '{rule.name}' failed\n".encode(),
                     {"Content-Type": "text/plain"})
-                print(f"[http] {method} {host}{path} (rule-error:{rule.name})",
-                      flush=True)
-                return markers, True
+                return _RulePhaseResult(True, marks, f"rule-error:{rule.name}")
             if terminal:
-                mark = f"{rctx.pending.kind}:{rule.name}"
                 audit.emit("rule", rule=rule.name, action=rule.action, host=host,
                            method=method, path=path, outcome=rctx.pending.kind,
                            visible=rule.visible)
                 flow.response = synthetic
-                print(f"[http] {method} {host}{path} ({mark})", flush=True)
-                return markers, True
+                return _RulePhaseResult(True, marks,
+                                        f"{rctx.pending.kind}:{rule.name}")
             # Non-terminal: a declarative rewrite or a script that only mutated.
             audit.emit("rule", rule=rule.name, action=rule.action, host=host,
                        method=method, path=path, outcome="rewrite",
                        visible=rule.visible)
-            markers.append(f"rewrite:{rule.name}")
-        return markers, False
+            marks.append(f"rewrite:{rule.name}")
+        return _RulePhaseResult(False, marks, None)
+
+    def _apply_request_rules(self, flow, creds, host, method, path):
+        """Request-phase rules, BEFORE injection. Returns `(markers, terminated)`:
+        on a non-terminal outcome the rewrite `markers` are handed back for the
+        caller to fold into the injection `[http]` line; on a terminal outcome
+        (block/respond, or a fail-closed 502) this logs its own `[http]` line and
+        signals the caller to skip injection."""
+        # Rules match against the PRE-rewrite host/path (captured before any
+        # rewrite runs). Correct today (a rewrite can't touch the request line --
+        # only headers, and Host rewrites are rejected); if a path-rewrite action
+        # is added, decide matching semantics explicitly rather than letting a
+        # rewrite silently re-target later rules.
+        rule_set = creds.rule_set()
+        matched = rule_set.request_rules(method, host, path) if rule_set else []
+        if not matched:
+            return [], False
+        r = self._evaluate_rules(flow, matched, rules.RuleRequestCtx(flow.request),
+                                 rules.apply_request_rule,
+                                 host=host, method=method, path=path)
+        if r.terminated:
+            marks = r.rewrite_marks + [r.terminal_mark]
+            print(f"[http] {method} {host}{path} ({' '.join(marks)})", flush=True)
+            return [], True                     # already logged; nothing to fold
+        return r.rewrite_marks, False           # fold into the injection line
 
     def _apply_response_rules(self, flow, creds, host) -> None:
-        """Evaluate response-phase rules in declaration order, AFTER re-seal (so a
-        token-endpoint response is already sealed into a placeholder before any
-        rule sees it). Rewrites mutate the response; a script that calls
-        block/respond replaces it. A script failure fails CLOSED (a 502)."""
+        """Response-phase rules, AFTER re-seal (a token-endpoint response is
+        already sealed into a placeholder before any rule sees it). Emits its own
+        folded `[http]` line for whatever ran."""
         # A terminal request rule already decided this flow (block/respond/502):
         # the response is synthetic policy output with no upstream to govern, and
         # a response rule must NOT run -- else a later on_response script could
@@ -210,37 +230,12 @@ class HostnameLogger:
         matched = rule_set.response_rules(req.method, host, path)
         if not matched:
             return
-        rctx = rules.RuleResponseCtx(flow)
-        rewrite_marks: list[str] = []  # folded into one [http] line at the end
-        for rule in matched:
-            try:
-                terminal = rules.apply_response_rule(rule, rctx)
-                synthetic = self._synthesize(rule, rctx.pending) if terminal else None
-            except Exception as e:  # RuleError or a synthesis failure -> fail closed
-                print(f"[rule] {rule.name} response failed: {e}", flush=True)
-                audit.emit("rule", rule=rule.name, action=rule.action, host=host,
-                           method=req.method, path=path, outcome="error")
-                flow.response = http.Response.make(
-                    502, f"credproxy: rule '{rule.name}' failed\n".encode(),
-                    {"Content-Type": "text/plain"})
-                return
-            if terminal:
-                audit.emit("rule", rule=rule.name, action=rule.action, host=host,
-                           method=req.method, path=path, outcome=rctx.pending.kind,
-                           visible=rule.visible)
-                flow.response = synthetic
-                marks = rewrite_marks + [f"{rctx.pending.kind}:{rule.name}"]
-                print(f"[http] {req.method} {host}{path} ({' '.join(marks)})",
-                      flush=True)
-                return
-            audit.emit("rule", rule=rule.name, action=rule.action, host=host,
-                       method=req.method, path=path, outcome="rewrite",
-                       visible=rule.visible)
-            rewrite_marks.append(f"rewrite:{rule.name}")
-        # Non-terminal response rules only: one folded [http] line (parity with
-        # the request phase, which folds its rewrite markers).
-        if rewrite_marks:
-            print(f"[http] {req.method} {host}{path} ({' '.join(rewrite_marks)})",
+        r = self._evaluate_rules(flow, matched, rules.RuleResponseCtx(flow),
+                                 rules.apply_response_rule,
+                                 host=host, method=req.method, path=path)
+        marks = r.rewrite_marks + ([r.terminal_mark] if r.terminated else [])
+        if marks:
+            print(f"[http] {req.method} {host}{path} ({' '.join(marks)})",
                   flush=True)
 
     def _synthesize(self, rule, pending: "rules.SyntheticResponse") -> http.Response:

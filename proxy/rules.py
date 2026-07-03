@@ -283,13 +283,32 @@ def _reject_authority_header(name: str) -> None:
             f"different host than the binding is scoped to")
 
 
-class RuleRequestCtx(RequestCtx):
+class _RuleSink:
+    """The terminal `block()`/`respond()` sinks + the `pending` slot shared by
+    both rule ctx phases. A hook records the synthetic response it wants on
+    `pending`; the addon reads `ctx.pending` and short-circuits. `reason` is for
+    a script's own diagnostics -- the wire body/attribution is decided by the
+    addon from the rule's visibility, not here. Each ctx `__init__` sets
+    `self.pending = None` (the mixin has no `__init__`, so it stays out of the
+    RequestCtx/ResponseCtx constructor chain)."""
+
+    pending: "SyntheticResponse | None"
+
+    def block(self, status: int = 403, reason: str | None = None) -> None:
+        self.pending = SyntheticResponse("block", int(status))
+
+    def respond(self, status: int, body: str = "", headers: dict | None = None) -> None:
+        self.pending = SyntheticResponse("respond", int(status),
+                                         body or "", dict(headers or {}))
+
+
+class RuleRequestCtx(_RuleSink, RequestCtx):
     """Request-phase surface for a rule. Reuses the injection RequestCtx read/
     mutate primitives (so scripted rules share the flat `req_*` primitive API)
     but carries NO secret -- `secret()` is unreachable because the rule Starlark
     profile omits it, and this ctx is constructed with an empty secret map. Adds
-    `header_del` and the terminal `block`/`respond` sinks. Overrides
-    `header_set`/`header_del` to reject Host/:authority mutation (scope escape)."""
+    the `block`/`respond` sinks (via _RuleSink) and overrides `header_set`/
+    `header_del` to reject Host/:authority mutation (credential scope escape)."""
 
     phase = "request"
 
@@ -306,21 +325,12 @@ class RuleRequestCtx(RequestCtx):
         if name in self._req.headers:
             del self._req.headers[name]
 
-    def block(self, status: int = 403, reason: str | None = None) -> None:
-        # reason is available to scripts for their own log/diagnostics; the wire
-        # body/attribution is decided by the addon from the rule's visibility.
-        self.pending = SyntheticResponse("block", int(status))
 
-    def respond(self, status: int, body: str = "", headers: dict | None = None) -> None:
-        self.pending = SyntheticResponse("respond", int(status),
-                                         body or "", dict(headers or {}))
-
-
-class RuleResponseCtx(ResponseCtx):
+class RuleResponseCtx(_RuleSink, ResponseCtx):
     """Response-phase surface for a rule. Reuses ResponseCtx (request reads are
     read-only; header/body mutation acts on the response). No minter, no secret.
-    Adds response `header_del` and lets a script `respond`/`block` REPLACE the
-    response wholesale."""
+    Adds the `block`/`respond` sinks (via _RuleSink) and a response `header_del`
+    -- a script `respond`/`block` REPLACES the response wholesale."""
 
     phase = "response"
 
@@ -331,13 +341,6 @@ class RuleResponseCtx(ResponseCtx):
     def header_del(self, name: str) -> None:
         if name in self._flow.response.headers:
             del self._flow.response.headers[name]
-
-    def block(self, status: int = 403, reason: str | None = None) -> None:
-        self.pending = SyntheticResponse("block", int(status))
-
-    def respond(self, status: int, body: str = "", headers: dict | None = None) -> None:
-        self.pending = SyntheticResponse("respond", int(status),
-                                         body or "", dict(headers or {}))
 
 
 class RuleError(Exception):
