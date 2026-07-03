@@ -166,10 +166,21 @@ list` marks hidden rules `HIDDEN`.
 ## CLI
 
 ```
-credproxy workspace NAME rule add --host HOST --action ACT [scoping] [action params]
+credproxy workspace NAME rule add ACTION --host HOST [scoping] [action params]
 credproxy workspace NAME rule remove NAME
 credproxy workspace NAME rule list
 credproxy workspace NAME rule test METHOD URL
+```
+
+`ACTION` is a subcommand — `block`, `respond`, `rewrite`, or `script` — and each
+owns exactly its own flags (e.g. `--body` is only valid under `respond`), so a
+misplaced flag is rejected by the parser:
+
+```
+rule add block   --host api.github.com --method DELETE --path '/repos/**'
+rule add respond --host api.openai.com --path /v1/models --status 200 --body '{}'
+rule add rewrite --host api.example.com --header X-Env=sandbox --remove-header X-Id
+rule add script  --host api.github.com --path '/users/**' --script scrub-emails
 ```
 
 `rule test` is the dry-run evaluator — the primary "why was/wasn't this blocked?"

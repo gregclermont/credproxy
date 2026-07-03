@@ -1227,18 +1227,33 @@ def test_mount_add_alias_resolves_default(xdg, workspaces_dir):
     ("script", "--status", "404"),
 ])
 def test_rule_add_rejects_out_of_action_flag(xdg, workspaces_dir, action, flag, value):
-    """A flag that doesn't belong to the chosen action fails at `rule add`
-    (rather than being silently dropped). The check precedes workspace
+    """A flag that doesn't belong to the chosen action's subparser is rejected by
+    argparse structurally (no rejection table). argparse fails before workspace
     resolution, so no workspace setup is needed."""
-    argv = ["workspace", "w", "rule", "add", "--host", "api.github.com",
-            "--action", action, flag, value]
-    if action == "respond":
-        argv += ["--status", "200"]
-    if action == "script":
-        argv += ["--script", "scrub-emails"]
-    ec, out, err = _run(argv)
+    ec, out, err = _run(["workspace", "w", "rule", "add", action,
+                         "--host", "api.github.com", flag, value])
     assert ec != 0
-    assert "does not accept" in err
+    assert "unrecognized arguments" in err or flag in err
+
+
+def test_rule_add_action_subcommand_happy_path(xdg, workspaces_dir):
+    """`rule add block ...` (action as a subcommand) writes the [[rule]] table."""
+    import tomllib
+    _mkws(workspaces_dir)
+    ec, out, err = _run(["workspace", "ws", "rule", "add", "block",
+                         "--host", "api.github.com", "--method", "DELETE",
+                         "--path", "/repos/**"])
+    assert ec == 0, err
+    raw = tomllib.loads((workspaces_dir / "ws.toml").read_text())
+    assert raw["rule"][0]["action"] == "block"
+    assert raw["rule"][0]["hosts"] == ["api.github.com"]
+    assert raw["rule"][0]["methods"] == ["DELETE"]
+
+
+def test_rule_add_no_action_fails(xdg, workspaces_dir):
+    """`rule add` with no action subcommand is a friendly argparse error."""
+    ec, out, err = _run(["workspace", "w", "rule", "add", "--host", "x.example.com"])
+    assert ec != 0
 
 
 def test_audit_line_forgery_rejected():

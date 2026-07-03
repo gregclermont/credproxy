@@ -941,52 +941,33 @@ def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     from ..core import rules as core_rules
 
+    action = a.rule_action                   # the subcommand: block/respond/rewrite/script
     if not a.host:
         fail("`rule add` needs at least one --host")
-    if a.action not in core_rules.ACTIONS:
-        fail(f"`rule add` needs --action one of {', '.join(core_rules.ACTIONS)}")
 
-    # Reject action-specific flags that don't belong to the chosen action, rather
-    # than silently dropping them (`block --body`, `respond --resp-header`,
-    # `script --status`). The shared parser accepts every flag; keyed by argparse
-    # dest -> (flag, actions it's valid for); common scoping flags always allowed.
-    _action_flags = {
-        "status": ("--status", {"block", "respond"}),
-        "body": ("--body", {"respond"}),
-        "header": ("--header", {"respond", "rewrite"}),
-        "remove_header": ("--remove-header", {"rewrite"}),
-        "resp_header": ("--resp-header", {"rewrite"}),
-        "resp_remove_header": ("--resp-remove-header", {"rewrite"}),
-        "script": ("--script", {"script"}),
-    }
-    misused = [flag for attr, (flag, ok) in _action_flags.items()
-               if getattr(a, attr, None) is not None and a.action not in ok]
-    if misused:
-        fail(f"`rule add --action {a.action}` does not accept "
-             f"{', '.join(sorted(misused))}")
-
-    # Build the raw rule-entry dict (the `[[rule]]` table shape) and route it
-    # through the ONE field validator (_parse_rule_entry) -- the same one the load
-    # path uses -- rather than constructing a Rule directly and leaning on
-    # validate() for field checks. Missing/malformed action params fail there.
-    entry: dict = {"action": a.action, "hosts": list(a.host)}
+    # Each action's subparser owns exactly its own flags (argparse rejects the
+    # rest), so we just marshal the flags that are present into the `[[rule]]`
+    # entry shape and route it through the ONE field validator (_parse_rule_entry)
+    # -- the same one the load path uses. Missing/malformed action params (a
+    # respond without --status, an empty rewrite) fail there, uniformly.
+    entry: dict = {"action": action, "hosts": list(a.host)}
     if a.method:
         entry["methods"] = list(a.method)
     if a.path is not None:
         entry["path"] = a.path
     if a.rule_visible is not None:
         entry["visible"] = a.rule_visible
-    if a.action == "block":
+    if action == "block":
         if a.status is not None:
             entry["status"] = a.status
-    elif a.action == "respond":
+    elif action == "respond":
         if a.status is not None:
             entry["status"] = a.status       # _parse_rule_entry requires it
         if a.body is not None:
             entry["body"] = a.body
         if a.header:
             entry["headers"] = _parse_kv(a.header, "--header")
-    elif a.action == "rewrite":
+    elif action == "rewrite":
         if a.header:
             entry["set_headers"] = _parse_kv(a.header, "--header")
         if a.remove_header:
@@ -995,7 +976,7 @@ def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
             entry["resp_set_headers"] = _parse_kv(a.resp_header, "--resp-header")
         if a.resp_remove_header:
             entry["resp_remove_headers"] = list(a.resp_remove_header)
-    elif a.action == "script":
+    elif action == "script":
         if a.script is not None:
             entry["script"] = a.script
 
@@ -1281,32 +1262,50 @@ def _binding_subparsers(parent: argparse._SubParsersAction) -> None:
 
 
 def _rule_subparsers(parent: argparse._SubParsersAction) -> None:
-    p = parent.add_parser("add")
-    p.add_argument("--host", action="append", metavar="HOST|GLOB")
-    p.add_argument("--action", default=None,
-                   help="block | respond | rewrite | script")
-    p.add_argument("--method", action="append", metavar="METHOD",
-                   help="restrict to these methods (repeatable; default all)")
-    p.add_argument("--path", default=None, metavar="GLOB",
-                   help="path glob: * within a segment, ** across (e.g. /repos/**)")
-    p.add_argument("--name", dest="rule_name", default=None)
-    p.add_argument("--visible", dest="rule_visible", action="store_true",
-                   default=None, help="force enumerated + attributed")
-    p.add_argument("--hidden", dest="rule_visible", action="store_false",
-                   default=None, help="force unenumerated + unattributed")
-    p.add_argument("--status", type=int, default=None,
-                   help="block/respond HTTP status")
-    p.add_argument("--body", default=None, help="respond body")
-    p.add_argument("--header", action="append", metavar="K=V",
-                   help="respond header, or rewrite set-header (repeatable)")
-    p.add_argument("--remove-header", action="append", metavar="NAME",
-                   dest="remove_header", help="rewrite: remove a request header")
-    p.add_argument("--resp-header", action="append", metavar="K=V",
-                   dest="resp_header", help="rewrite: set a response header")
-    p.add_argument("--resp-remove-header", action="append", metavar="NAME",
-                   dest="resp_remove_header", help="rewrite: remove a response header")
-    p.add_argument("--script", default=None, metavar="NAME",
-                   help="script action: the .star rule script name")
+    add = parent.add_parser("add")
+    # The action is a SUBCOMMAND (`rule add block|respond|rewrite|script`), not a
+    # `--action` flag, so each action's parser owns exactly its own params and
+    # argparse rejects an out-of-action flag structurally -- no hand-rolled
+    # rejection table. The scoping flags common to every action live on a shared
+    # parent parser mixed into each via `parents=`.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--host", action="append", metavar="HOST|GLOB", dest="host",
+                        help="literal or glob (`*.amazonaws.com`); repeatable")
+    common.add_argument("--method", action="append", metavar="METHOD", dest="method",
+                        help="restrict to these methods (repeatable; default all)")
+    common.add_argument("--path", default=None, metavar="GLOB",
+                        help="path glob: * within a segment, ** across (e.g. /repos/**)")
+    common.add_argument("--name", dest="rule_name", default=None,
+                        help="rule name (auto-generated if omitted)")
+    common.add_argument("--visible", dest="rule_visible", action="store_true",
+                        default=None, help="force enumerated + attributed")
+    common.add_argument("--hidden", dest="rule_visible", action="store_false",
+                        default=None, help="force unenumerated + unattributed")
+    asub = add.add_subparsers(dest="rule_action", required=True,
+                              metavar="{block,respond,rewrite,script}")
+
+    pb = asub.add_parser("block", parents=[common])
+    pb.add_argument("--status", type=int, default=None, help="refuse status (default 403)")
+
+    pr = asub.add_parser("respond", parents=[common])
+    pr.add_argument("--status", type=int, default=None, help="response status (required)")
+    pr.add_argument("--body", default=None, help="response body")
+    pr.add_argument("--header", action="append", metavar="K=V", dest="header",
+                    help="a response header (repeatable)")
+
+    pw = asub.add_parser("rewrite", parents=[common])
+    pw.add_argument("--header", action="append", metavar="K=V", dest="header",
+                    help="set a request header (repeatable)")
+    pw.add_argument("--remove-header", action="append", metavar="NAME",
+                    dest="remove_header", help="remove a request header")
+    pw.add_argument("--resp-header", action="append", metavar="K=V",
+                    dest="resp_header", help="set a response header")
+    pw.add_argument("--resp-remove-header", action="append", metavar="NAME",
+                    dest="resp_remove_header", help="remove a response header")
+
+    ps = asub.add_parser("script", parents=[common])
+    ps.add_argument("--script", default=None, metavar="NAME",
+                    help="the .star rule script name")
 
     p = parent.add_parser("remove")
     p.add_argument("rule_name", metavar="NAME")
@@ -1535,13 +1534,13 @@ _MOUNT_ADD_HELP = (
 )
 
 _RULE_ADD_HELP = (
-    "credproxy workspace NAME rule add --host HOST [--host HOST...] --action ACT\n"
-    "  Govern traffic on an intercepted host (no credential involved). ACT is one\n"
-    "  of block|respond|rewrite|script. Adding a rule to a passthrough host makes\n"
-    "  it TLS-intercepted (so the workspace must have bootstrapped the CA).\n"
+    "credproxy workspace NAME rule add ACTION --host HOST [--host HOST...] ...\n"
+    "  Govern traffic on an intercepted host (no credential involved). ACTION is a\n"
+    "  SUBCOMMAND -- one of block|respond|rewrite|script (not a flag). Adding a rule\n"
+    "  to a passthrough host makes it TLS-intercepted (workspace must bootstrap CA).\n"
     "\n"
-    "  Scoping (all optional):\n"
-    "    --host HOST|GLOB   literal or glob (`*.amazonaws.com`); repeatable\n"
+    "  Scoping (every action):\n"
+    "    --host HOST|GLOB   literal or glob (`*.amazonaws.com`); repeatable, required\n"
     "    --method METHOD    restrict to these methods (repeatable; default all)\n"
     "    --path GLOB        path glob: `*` within a segment, `**` across\n"
     "                       (e.g. /repos/**); default all paths\n"
@@ -1549,13 +1548,17 @@ _RULE_ADD_HELP = (
     "    --visible/--hidden override the per-family enumeration+attribution default\n"
     "                       (block/respond visible; rewrite/script hidden)\n"
     "\n"
-    "  Per action:\n"
-    "    block     [--status N]                     refuse (default 403)\n"
-    "    respond   --status N [--body TEXT] [--header K=V ...]   stub a response\n"
-    "    rewrite   [--header K=V] [--remove-header NAME]         request headers\n"
-    "              [--resp-header K=V] [--resp-remove-header NAME]  response headers\n"
-    "    script    --script NAME                    a .star rule script (block/\n"
-    "                                               respond/rewrite via primitives)\n"
+    "  Per action (each owns exactly these flags):\n"
+    "    block    [--status N]                              refuse (default 403)\n"
+    "    respond  --status N [--body TEXT] [--header K=V...] stub a response\n"
+    "    rewrite  [--header K=V] [--remove-header NAME]      request headers\n"
+    "             [--resp-header K=V] [--resp-remove-header NAME]  response headers\n"
+    "    script   --script NAME                             a .star rule script\n"
+    "\n"
+    "  Examples:\n"
+    "    rule add block --host api.github.com --method DELETE --path '/repos/**'\n"
+    "    rule add respond --host api.openai.com --path /v1/models --status 200 --body '{}'\n"
+    "    rule add script --host api.github.com --path '/users/**' --script scrub-emails\n"
     "\n"
     "  A visible block self-identifies (X-Credproxy-Rule header + a credproxy JSON\n"
     "  body); a hidden block is a bare status. Hidden rules are excluded from\n"
