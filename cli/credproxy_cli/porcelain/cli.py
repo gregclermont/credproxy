@@ -937,8 +937,9 @@ def _rule_row(rule) -> dict:
 
 
 def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    from dataclasses import replace as _replace
+
     from ..core import rules as core_rules
-    from ..core.rules import Rule
 
     if not a.host:
         fail("`rule add` needs at least one --host")
@@ -947,10 +948,8 @@ def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     # Reject action-specific flags that don't belong to the chosen action, rather
     # than silently dropping them (`block --body`, `respond --resp-header`,
-    # `script --status`). The shared parser accepts every flag; this mirrors the
-    # proxy's misplaced-field rejection so a wrong flag fails at `rule add`, not
-    # by installing a weaker/different rule. Keyed by argparse dest -> (flag,
-    # actions it's valid for); common scoping flags are always allowed.
+    # `script --status`). The shared parser accepts every flag; keyed by argparse
+    # dest -> (flag, actions it's valid for); common scoping flags always allowed.
     _action_flags = {
         "status": ("--status", {"block", "respond"}),
         "body": ("--body", {"respond"}),
@@ -966,30 +965,39 @@ def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         fail(f"`rule add --action {a.action}` does not accept "
              f"{', '.join(sorted(misused))}")
 
-    kwargs: dict = {}
+    # Build the raw rule-entry dict (the `[[rule]]` table shape) and route it
+    # through the ONE field validator (_parse_rule_entry) -- the same one the load
+    # path uses -- rather than constructing a Rule directly and leaning on
+    # validate() for field checks. Missing/malformed action params fail there.
+    entry: dict = {"action": a.action, "hosts": list(a.host)}
+    if a.method:
+        entry["methods"] = list(a.method)
+    if a.path is not None:
+        entry["path"] = a.path
+    if a.rule_visible is not None:
+        entry["visible"] = a.rule_visible
     if a.action == "block":
         if a.status is not None:
-            kwargs["status"] = a.status
+            entry["status"] = a.status
     elif a.action == "respond":
-        if a.status is None:
-            fail("`rule add --action respond` needs --status")
-        kwargs["status"] = a.status
-        kwargs["body"] = a.body
-        kwargs["headers"] = _parse_kv(a.header, "--header")
+        if a.status is not None:
+            entry["status"] = a.status       # _parse_rule_entry requires it
+        if a.body is not None:
+            entry["body"] = a.body
+        if a.header:
+            entry["headers"] = _parse_kv(a.header, "--header")
     elif a.action == "rewrite":
-        sh = _parse_kv(a.header, "--header")
-        rsh = _parse_kv(a.resp_header, "--resp-header")
-        rh = tuple(a.remove_header) if a.remove_header else None
-        rrh = tuple(a.resp_remove_header) if a.resp_remove_header else None
-        if not (sh or rsh or rh or rrh):
-            fail("`rule add --action rewrite` needs at least one of --header/"
-                 "--remove-header/--resp-header/--resp-remove-header")
-        kwargs.update(set_headers=sh, remove_headers=rh,
-                      resp_set_headers=rsh, resp_remove_headers=rrh)
+        if a.header:
+            entry["set_headers"] = _parse_kv(a.header, "--header")
+        if a.remove_header:
+            entry["remove_headers"] = list(a.remove_header)
+        if a.resp_header:
+            entry["resp_set_headers"] = _parse_kv(a.resp_header, "--resp-header")
+        if a.resp_remove_header:
+            entry["resp_remove_headers"] = list(a.resp_remove_header)
     elif a.action == "script":
-        if not a.script:
-            fail("`rule add --action script` needs --script NAME")
-        kwargs["script"] = a.script
+        if a.script is not None:
+            entry["script"] = a.script
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
@@ -997,20 +1005,17 @@ def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
     with ws.lock():                          # atomic read-validate-write
         existing = core_rules.load_rules(ws)
         taken = {r.name for r in existing}
-        rule = Rule(
-            name=None, hosts=tuple(a.host), action=a.action,
-            methods=tuple(m.upper() for m in a.method) if a.method else None,
-            path=a.path, visible=a.rule_visible, **kwargs,
-        )
-        rname = a.rule_name or core_rules._auto_name(rule, taken)
-        if rname in taken:
-            fail(f"rule name '{rname}' already exists in workspace '{ws.name}'")
-        from dataclasses import replace as _replace
-        rule = _replace(rule, name=rname)
+        if a.rule_name:
+            entry["name"] = a.rule_name
+        rule = core_rules._parse_rule_entry(entry, str(ws.config_path), "rule add")
+        if rule.name is None:
+            rule = _replace(rule, name=core_rules._auto_name(rule, taken))
+        if rule.name in taken:
+            fail(f"rule name '{rule.name}' already exists in workspace '{ws.name}'")
         core_rules.validate(existing + [rule], str(ws.config_path))
         core_rules.append_rule(ws, rule)
 
-    render.OUT.rule_added(rname, ws.name, _rule_row(rule))
+    render.OUT.rule_added(rule.name, ws.name, _rule_row(rule))
 
 
 def do_rule_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:

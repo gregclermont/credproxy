@@ -321,14 +321,32 @@ def test_fingerprint_changes_on_reorder():
     assert combined_fingerprint([], [r1, r2]) != combined_fingerprint([], [r2, r1])
 
 
-def test_validate_rejects_out_of_range_status():
-    # `rule add` builds a Rule directly and only calls validate(); a bad status
-    # must be caught there, not written to a file that then fails every load.
+def test_parse_rule_entry_rejects_out_of_range_status():
+    # Field-shape validation lives in the ONE per-entry validator now (used by
+    # both the load path and `rule add`); a bad status is caught there.
     from credproxy_cli.core.errors import ConfigError
-    from credproxy_cli.core.rules import Rule, validate
-    r = Rule(name="r", hosts=("h.example.com",), action="block", status=999)
+    from credproxy_cli.core.rules import _parse_rule_entry
     with pytest.raises(ConfigError, match="status"):
-        validate([r], "src")
+        _parse_rule_entry({"action": "block", "hosts": ["h.example.com"],
+                           "status": 999}, "src", "rule")
+
+
+def test_parse_rule_entry_builds_and_validates():
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.rules import _parse_rule_entry
+    r = _parse_rule_entry({"action": "respond", "hosts": ["api.x.com"],
+                           "status": 200, "body": "{}",
+                           "headers": {"Content-Type": "application/json"}},
+                          "src", "rule")
+    assert r.action == "respond" and r.status == 200 and r.body == "{}"
+    assert r.headers == {"Content-Type": "application/json"}
+    # respond without a status is rejected here (not deferred to validate)
+    with pytest.raises(ConfigError, match="requires a 'status'"):
+        _parse_rule_entry({"action": "respond", "hosts": ["h.x.com"]}, "src", "rule")
+    # a field not valid for the action is rejected here
+    with pytest.raises(ConfigError, match="not valid for action 'block'"):
+        _parse_rule_entry({"action": "block", "hosts": ["h.x.com"], "body": "x"},
+                          "src", "rule")
 
 
 def test_remove_rule_with_child_table(xdg, workspaces_dir):

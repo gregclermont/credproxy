@@ -117,112 +117,112 @@ def _as_str_list(value, source: str, where: str) -> tuple:
     return tuple(value)
 
 
+def _parse_rule_entry(r: dict, source: str, where: str) -> Rule:
+    """Validate one raw rule table and build a `Rule`. The SINGLE CLI-side field
+    validator -- types, presence, ranges, extra-field rejection, per-action
+    required params -- used by both the load path (`_parse_rules`) and `rule add`
+    (`do_rule_add` builds an entry dict and routes it here), so field validation
+    lives in exactly one place. Mirrors proxy/config._load_rules's per-entry
+    logic (a separate deploy unit; wire-parity tested). The cross-rule/semantic
+    checks -- unique names, host-pattern validity, the Host/:authority rewrite
+    ban, script-name resolution -- are in `validate()`, not here."""
+    if not isinstance(r, dict):
+        raise ConfigError(f"{source}: {where} must be a table")
+
+    action = r.get("action")
+    if action not in ACTIONS:
+        raise ConfigError(f"{source}: {where}.action must be one of "
+                          f"{', '.join(ACTIONS)} (got {action!r})")
+    allowed = _COMMON_FIELDS | _ACTION_FIELDS[action]
+    extra = set(r) - allowed
+    if extra:
+        raise ConfigError(f"{source}: {where} has field(s) not valid for "
+                          f"action '{action}': {', '.join(sorted(extra))}")
+
+    hosts = r.get("hosts")
+    if not isinstance(hosts, list) or not hosts \
+            or not all(isinstance(h, str) and h for h in hosts):
+        raise ConfigError(
+            f"{source}: {where}.hosts is required (non-empty array of strings)")
+
+    name = r.get("name")
+    if name is not None and (not isinstance(name, str) or not name):
+        raise ConfigError(f"{source}: {where}.name must be a non-empty string")
+
+    methods = r.get("methods")
+    if methods is None:
+        method_tuple = None
+    else:
+        method_list = _as_str_list(methods, source, f"{where}.methods")
+        if not method_list:
+            raise ConfigError(f"{source}: {where}.methods must be a non-empty "
+                              f"array (omit it entirely to match all methods)")
+        method_tuple = tuple(m.upper() for m in method_list)
+
+    path = r.get("path")
+    if path is not None:
+        if not isinstance(path, str):
+            raise ConfigError(f"{source}: {where}.path must be a string")
+        perr = pathmatch.validate_path(path)
+        if perr:
+            raise ConfigError(f"{source}: {where}.path: {perr}")
+
+    visible = r.get("visible")
+    if visible is not None and not isinstance(visible, bool):
+        raise ConfigError(f"{source}: {where}.visible must be a boolean")
+
+    kwargs = {}
+    if action == "block":
+        kwargs["status"] = _parse_status(r, source, where, default=403)
+    elif action == "respond":
+        if r.get("status") is None:
+            raise ConfigError(f"{source}: {where} action 'respond' requires "
+                              f"a 'status'")
+        kwargs["status"] = _parse_status(r, source, where, default=None)
+        body = r.get("body")
+        if body is not None and not isinstance(body, str):
+            raise ConfigError(f"{source}: {where}.body must be a string")
+        kwargs["body"] = body
+        headers = r.get("headers")
+        kwargs["headers"] = (_as_str_map(headers, source, f"{where}.headers")
+                             if headers is not None else None)
+    elif action == "rewrite":
+        sh, rh = r.get("set_headers"), r.get("remove_headers")
+        rsh, rrh = r.get("resp_set_headers"), r.get("resp_remove_headers")
+        if sh is None and rh is None and rsh is None and rrh is None:
+            raise ConfigError(f"{source}: {where} action 'rewrite' needs at "
+                              f"least one of set_headers/remove_headers/"
+                              f"resp_set_headers/resp_remove_headers")
+        kwargs["set_headers"] = (_as_str_map(sh, source, f"{where}.set_headers")
+                                 if sh is not None else None)
+        kwargs["remove_headers"] = (_as_str_list(rh, source, f"{where}.remove_headers")
+                                    if rh is not None else None)
+        kwargs["resp_set_headers"] = (_as_str_map(rsh, source, f"{where}.resp_set_headers")
+                                      if rsh is not None else None)
+        kwargs["resp_remove_headers"] = (_as_str_list(rrh, source, f"{where}.resp_remove_headers")
+                                         if rrh is not None else None)
+    elif action == "script":
+        script = r.get("script")
+        if not isinstance(script, str) or not script:
+            raise ConfigError(f"{source}: {where} action 'script' requires a "
+                              f"'script' name")
+        kwargs["script"] = script
+        api = r.get("api", 1)
+        if not isinstance(api, int) or isinstance(api, bool):
+            raise ConfigError(f"{source}: {where}.api must be an integer")
+        kwargs["api"] = api
+
+    return Rule(name=name, hosts=tuple(hosts), action=action,
+                methods=method_tuple, path=path, visible=visible, **kwargs)
+
+
 def _parse_rules(raw: dict, source: str) -> list[Rule]:
-    """Parse the `[[rule]]` array from a raw TOML dict. Validates field
-    types/presence and rejects fields not valid for the action, but NOT
-    cross-rule uniqueness (see `validate`)."""
+    """Parse the `[[rule]]` array from a raw TOML dict via the per-entry
+    validator. Cross-rule/semantic checks are `validate`'s job."""
     items = raw.get("rule") or []
     if not isinstance(items, list):
         raise ConfigError(f"{source}: `rule` must be an array of tables")
-    out: list[Rule] = []
-    for i, r in enumerate(items):
-        if not isinstance(r, dict):
-            raise ConfigError(f"{source}: rule[{i}] must be a table")
-        where = f"rule[{i}]"
-
-        action = r.get("action")
-        if action not in ACTIONS:
-            raise ConfigError(f"{source}: {where}.action must be one of "
-                              f"{', '.join(ACTIONS)} (got {action!r})")
-        allowed = _COMMON_FIELDS | _ACTION_FIELDS[action]
-        extra = set(r) - allowed
-        if extra:
-            raise ConfigError(f"{source}: {where} has field(s) not valid for "
-                              f"action '{action}': {', '.join(sorted(extra))}")
-
-        hosts = r.get("hosts")
-        if not isinstance(hosts, list) or not hosts \
-                or not all(isinstance(h, str) and h for h in hosts):
-            raise ConfigError(
-                f"{source}: {where}.hosts is required (non-empty array of strings)")
-
-        name = r.get("name")
-        if name is not None and (not isinstance(name, str) or not name):
-            raise ConfigError(f"{source}: {where}.name must be a non-empty string")
-
-        methods = r.get("methods")
-        if methods is None:
-            method_tuple = None
-        else:
-            method_list = _as_str_list(methods, source, f"{where}.methods")
-            if not method_list:
-                raise ConfigError(f"{source}: {where}.methods must be a non-empty "
-                                  f"array (omit it entirely to match all methods)")
-            method_tuple = tuple(m.upper() for m in method_list)
-
-        path = r.get("path")
-        if path is not None:
-            if not isinstance(path, str):
-                raise ConfigError(f"{source}: {where}.path must be a string")
-            perr = pathmatch.validate_path(path)
-            if perr:
-                raise ConfigError(f"{source}: {where}.path: {perr}")
-
-        visible = r.get("visible")
-        if visible is not None and not isinstance(visible, bool):
-            raise ConfigError(f"{source}: {where}.visible must be a boolean")
-
-        kwargs = {}
-        if action == "block":
-            kwargs["status"] = _parse_status(r, source, where, default=403)
-        elif action == "respond":
-            if r.get("status") is None:
-                raise ConfigError(f"{source}: {where} action 'respond' requires "
-                                  f"a 'status'")
-            kwargs["status"] = _parse_status(r, source, where, default=None)
-            body = r.get("body")
-            if body is not None and not isinstance(body, str):
-                raise ConfigError(f"{source}: {where}.body must be a string")
-            kwargs["body"] = body
-            headers = r.get("headers")
-            kwargs["headers"] = (_as_str_map(headers, source, f"{where}.headers")
-                                 if headers is not None else None)
-        elif action == "rewrite":
-            sh, rh = r.get("set_headers"), r.get("remove_headers")
-            rsh, rrh = r.get("resp_set_headers"), r.get("resp_remove_headers")
-            if sh is None and rh is None and rsh is None and rrh is None:
-                raise ConfigError(f"{source}: {where} action 'rewrite' needs at "
-                                  f"least one of set_headers/remove_headers/"
-                                  f"resp_set_headers/resp_remove_headers")
-            kwargs["set_headers"] = (_as_str_map(sh, source, f"{where}.set_headers")
-                                     if sh is not None else None)
-            kwargs["remove_headers"] = (_as_str_list(rh, source, f"{where}.remove_headers")
-                                        if rh is not None else None)
-            kwargs["resp_set_headers"] = (_as_str_map(rsh, source, f"{where}.resp_set_headers")
-                                          if rsh is not None else None)
-            kwargs["resp_remove_headers"] = (_as_str_list(rrh, source, f"{where}.resp_remove_headers")
-                                             if rrh is not None else None)
-        elif action == "script":
-            script = r.get("script")
-            if not isinstance(script, str) or not script:
-                raise ConfigError(f"{source}: {where} action 'script' requires a "
-                                  f"'script' name")
-            kwargs["script"] = script
-            api = r.get("api", 1)
-            if not isinstance(api, int) or isinstance(api, bool):
-                raise ConfigError(f"{source}: {where}.api must be an integer")
-            kwargs["api"] = api
-
-        out.append(Rule(
-            name=name,
-            hosts=tuple(hosts),
-            action=action,
-            methods=method_tuple,
-            path=path,
-            visible=visible,
-            **kwargs,
-        ))
-    return out
+    return [_parse_rule_entry(r, source, f"rule[{i}]") for i, r in enumerate(items)]
 
 
 def _parse_status(r: dict, source: str, where: str, default):
@@ -267,9 +267,14 @@ def _with_auto_names(rules: list[Rule]) -> list[Rule]:
 
 
 def validate(rules: list[Rule], source: str) -> None:
-    """Cross-rule validation: unique names; valid host/path globs; a script
-    action's `.star` must resolve. Mirrors proxy/config._load_rules so a bad rule
-    is caught at `rule add`. Names must already be materialized (non-None)."""
+    """Cross-rule + semantic validation on already-field-parsed rules. Every
+    caller runs `_parse_rule_entry` first (load path via `_parse_rules`; `rule
+    add` directly), so field shapes/ranges/required params are guaranteed here --
+    this only checks what needs the whole set or the registry: unique names,
+    host-pattern validity, the Host/:authority rewrite ban, and script-name
+    resolution. Together with `_parse_rule_entry` it mirrors proxy/config.
+    _load_rules (a separate deploy unit; the proxy has no `find_script` -- it
+    receives the resolved script source). Names must already be materialized."""
     names: set[str] = set()
     for r in rules:
         if r.name is None:
@@ -284,31 +289,6 @@ def validate(rules: list[Rule], source: str) -> None:
                 if err:
                     raise ConfigError(f"{source}: rule '{r.name}': {err}")
 
-        if r.path is not None:
-            perr = pathmatch.validate_path(r.path)
-            if perr:
-                raise ConfigError(f"{source}: rule '{r.name}': {perr}")
-
-        if r.methods is not None and not r.methods:
-            raise ConfigError(f"{source}: rule '{r.name}': methods must be a "
-                              f"non-empty array (omit it to match all methods)")
-
-        # Per-action field validation. _parse_rules does this for the load path,
-        # but `rule add` constructs a Rule directly and only calls validate(), so
-        # repeat it here or a bad rule (e.g. --status 999) writes a file that then
-        # fails every subsequent load.
-        if r.status is not None and (not isinstance(r.status, int)
-                                     or isinstance(r.status, bool)
-                                     or not (100 <= r.status <= 599)):
-            raise ConfigError(f"{source}: rule '{r.name}': status must be an "
-                              f"integer HTTP status (100-599), got {r.status!r}")
-        if r.action == "respond" and r.status is None:
-            raise ConfigError(f"{source}: rule '{r.name}': action 'respond' "
-                              f"requires a status")
-        if r.action == "rewrite" and not (r.set_headers or r.remove_headers
-                                          or r.resp_set_headers or r.resp_remove_headers):
-            raise ConfigError(f"{source}: rule '{r.name}': action 'rewrite' needs "
-                              f"at least one header operation")
         if r.action == "rewrite":
             for hn in list(r.set_headers or {}) + list(r.remove_headers or ()):
                 if hn.lower() in _FORBIDDEN_REWRITE_HEADERS:
@@ -317,10 +297,8 @@ def validate(rules: list[Rule], source: str) -> None:
                         f"request authority header '{hn}' (Host/:authority) -- it "
                         f"would send the injected credential under a different "
                         f"host than the binding is scoped to")
+
         if r.action == "script":
-            if not r.script:
-                raise ConfigError(f"{source}: rule '{r.name}': action 'script' "
-                                  f"requires a script name")
             from .scripts import find_script
             try:
                 find_script(r.script)
