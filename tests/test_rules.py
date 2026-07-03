@@ -2,6 +2,7 @@
 union, the addon request/response pipeline (the security invariant), visibility,
 audit events, and the sandboxed rule-script profile."""
 import json
+from pathlib import Path
 
 import pytest
 from mitmproxy import http
@@ -11,6 +12,11 @@ import addon
 import config
 import rules
 from config import ConfigError
+
+# The builtin rule script, mounted read-only at /opt/cli in the proxy test image
+# (see do_dev_test) -- single source of truth, exercised end-to-end below.
+_SCRUB_EMAILS = (Path(__file__).resolve().parents[1] / "cli" / "credproxy_cli"
+                 / "builtin" / "scripts" / "scrub-emails.star").read_text()
 
 
 # ---- helpers ----------------------------------------------------------------
@@ -356,3 +362,121 @@ def test_inward_rules_excludes_hidden():
     names = [r["name"] for r in inward]
     assert names == ["vis"]
     assert "set_headers" not in json.dumps(inward)   # no rewrite values leaked
+
+
+# ---- first-terminal-wins across phases (P1-A) -------------------------------
+
+def test_terminal_request_rule_suppresses_later_response_rule():
+    # A request `block` terminates the flow; mitmproxy still fires response(), but
+    # a later on_response script must NOT run -- else it could undo the block.
+    creds = _creds([
+        {"name": "blk", "hosts": ["api.github.com"], "action": "block"},
+        _script_rule("undo", "def on_response():\n    respond(200, 'pwned')\n"),
+    ])
+    log = addon.HostnameLogger(_state(creds))
+    flow = _flow()
+    log.request(flow)
+    assert flow.response.status_code == 403
+    assert flow.metadata.get("credproxy_rule_terminated") is True
+    log.response(flow)                       # simulate mitmproxy's response hook
+    assert flow.response.status_code == 403  # NOT rewritten to 200
+    assert flow.response.content != b"pwned"
+
+
+def test_fail_closed_502_not_undone_by_response_rule():
+    # The fail-closed 502 (a request script that raises) must also suppress later
+    # response rules -- same violation, different hat.
+    creds = _creds([
+        _script_rule("boom", _RAISE_SCRIPT),
+        _script_rule("undo", "def on_response():\n    respond(200, 'pwned')\n"),
+    ])
+    log = addon.HostnameLogger(_state(creds))
+    flow = _flow()
+    log.request(flow)
+    assert flow.response.status_code == 502
+    log.response(flow)
+    assert flow.response.status_code == 502
+
+
+def test_reseal_withheld_502_not_followed_by_response_rule():
+    # The re-seal-withhold 502 in response() returns before response rules run;
+    # assert that stays true (a response rewrite must not apply over the 502).
+    creds = _creds([{"name": "rw", "hosts": ["api.github.com"], "action": "rewrite",
+                     "resp_set_headers": {"X-Ran": "1"}}])
+    log = addon.HostnameLogger(_state(creds))
+    flow = _flow(resp=True)
+
+    class _RaisingReseal:
+        name = "reseal"
+        mutates_response = True
+
+        def on_response(self, ctx):
+            raise RuntimeError("boom")
+
+    flow.metadata["credproxy_fired"] = [config.Transform(
+        name="reseal", scheme=_RaisingReseal(), params={},
+        placeholder=None, secrets={})]
+    log.response(flow)
+    assert flow.response.status_code == 502
+    assert "X-Ran" not in flow.response.headers   # response rule did NOT run
+
+
+# ---- Host/authority rewrite rejected (P1-B) ---------------------------------
+
+@pytest.mark.parametrize("rule", [
+    {"name": "h", "hosts": ["api.github.com"], "action": "rewrite",
+     "set_headers": {"Host": "evil.com"}},
+    {"name": "h", "hosts": ["api.github.com"], "action": "rewrite",
+     "set_headers": {"host": "evil.com"}},        # case-insensitive
+    {"name": "h", "hosts": ["api.github.com"], "action": "rewrite",
+     "remove_headers": ["Host"]},
+    {"name": "h", "hosts": ["api.github.com"], "action": "rewrite",
+     "set_headers": {":authority": "evil.com"}},
+])
+def test_declarative_host_rewrite_rejected(rule):
+    with pytest.raises(ConfigError, match="authority|Host"):
+        _creds([rule])
+
+
+def test_script_host_rewrite_fails_closed():
+    # A scripted req_set_header("Host", ...) compiles (the primitive exists) but
+    # fails closed at runtime -- and the header is never actually mutated.
+    creds = _creds([_script_rule(
+        "h", 'def on_request():\n    req_set_header("Host", "evil.com")\n')])
+    log = addon.HostnameLogger(_state(creds))
+    flow = _flow()
+    log.request(flow)
+    assert flow.response.status_code == 502
+    assert flow.request.headers.get("Host") != "evil.com"
+
+
+# ---- builtin scrub-emails rule script ---------------------------------------
+
+def test_builtin_scrub_emails_object_and_list():
+    creds = _creds([_script_rule("scrub-emails", _SCRUB_EMAILS, path="/users/**")])
+    log = addon.HostnameLogger(_state(creds))
+
+    # single object
+    flow = _flow(host="api.github.com", path="/users/octo", resp=True)
+    flow.response.text = json.dumps(
+        {"login": "octo", "email": "a@b.com", "notification_email": "n@b.com"})
+    log.response(flow)
+    data = json.loads(flow.response.text)
+    assert data["email"] is None and data["notification_email"] is None
+    assert data["login"] == "octo"            # non-email fields untouched
+
+    # list of objects
+    flow = _flow(host="api.github.com", path="/users/x/list", resp=True)
+    flow.response.text = json.dumps([{"email": "a@b.com"}, {"login": "y"}])
+    log.response(flow)
+    data = json.loads(flow.response.text)
+    assert data[0]["email"] is None and data[1]["login"] == "y"
+
+
+def test_builtin_scrub_emails_passthrough_non_object():
+    creds = _creds([_script_rule("scrub-emails", _SCRUB_EMAILS, path="/users/**")])
+    log = addon.HostnameLogger(_state(creds))
+    flow = _flow(host="api.github.com", path="/users/scalar", resp=True)
+    flow.response.text = json.dumps("just a string")
+    log.response(flow)
+    assert json.loads(flow.response.text) == "just a string"

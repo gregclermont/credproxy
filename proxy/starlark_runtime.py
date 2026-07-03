@@ -489,25 +489,31 @@ RULE_PRIMITIVES = {
     "respond": _respond,
 }
 
-# Names a rule script may NOT reference. Enforced at COMPILE time via a source
-# scan (see ScriptedScheme) so the author gets a clear, specific message rather
-# than an "undefined: secret" at first request. Covers the credential door
-# (`secret`), the re-seal mints, and the crypto/carrier primitives.
+# Credential-bearing primitives a rule may not reach. They are simply ABSENT
+# from RULE_PRIMITIVES (the real guard), so starlark-rust's name resolver rejects
+# a rule that references one at CONSTRUCTION -- `Variable `secret` not found` --
+# with no source scan needed (verified in-image). This set only lets us turn that
+# resolver error into a targeted hint (see _rule_compile_hint) instead of a raw
+# "variable not found". Covers the credential door (`secret`), the re-seal mints,
+# and the crypto/carrier primitives.
 FORBIDDEN_RULE_PRIMITIVES = frozenset({
     "secret", "mint", "mint_into_json",
     "hmac_sha256", "hmac_sha256_hex", "sha256_hex", "sha1_hex",
     "rs256_sign", "jwt_encode_sign", "b64_to_hex", "hex_to_b64",
 })
 
+_MISSING_VAR_RE = re.compile(r"Variable `([^`]+)` not found")
 
-def _forbidden_rule_reference(source: str) -> str | None:
-    """Return the first forbidden primitive a rule script references, else None.
-    A word-boundary scan: a rule that names a local `secret` is rejected too,
-    which is fine -- the point is that credential-bearing primitives are simply
-    inexpressible in a rule script."""
-    for name in sorted(FORBIDDEN_RULE_PRIMITIVES):
-        if re.search(rf"(?<![\w.]){re.escape(name)}\s*\(", source):
-            return name
+
+def _rule_compile_hint(err: Exception) -> str | None:
+    """If a rule failed to compile because it referenced a credential-bearing
+    primitive absent from RULE_PRIMITIVES, return a targeted message; else None
+    (the raw compile error is surfaced -- it's unsanitized for rule scripts)."""
+    m = _MISSING_VAR_RE.search(str(err))
+    if m and m.group(1) in FORBIDDEN_RULE_PRIMITIVES:
+        return (f"rule script may not use '{m.group(1)}': a rule governs traffic "
+                f"but can never touch credential material (the secret/mint/crypto "
+                f"primitives are unavailable in rule scripts)")
     return None
 
 
@@ -560,14 +566,10 @@ class ScriptedScheme:
         self._has_on_request = bool(_HAS_ON_REQUEST.search(source))
 
         if kind == "rule":
-            forbidden = _forbidden_rule_reference(source)
-            if forbidden is not None:
-                raise ValueError(
-                    f"rule script may not use '{forbidden}()': a rule governs "
-                    f"traffic but can never touch credential material (the "
-                    f"secret/mint/crypto primitives are unavailable in rule "
-                    f"scripts)")
-            if not _HAS_ON_REQUEST.search(source) and not self._has_on_response:
+            # Credential-bearing primitives are absent from RULE_PRIMITIVES, so
+            # the resolver (below) rejects any reference to one at construction --
+            # no source scan needed. We only require at least one hook to exist.
+            if not self._has_on_request and not self._has_on_response:
                 raise ValueError(
                     "rule script defines neither on_request() nor on_response()")
             primitives = RULE_PRIMITIVES
@@ -578,8 +580,18 @@ class ScriptedScheme:
         for prim_name, fn in primitives.items():
             module.add_callable(prim_name, fn)
         ast = starlark.parse(filename or f"{name}.star", source)
-        # No file_loader -> load() is rejected; standard globals only.
-        starlark.eval(module, ast, _GLOBALS)
+        # No file_loader -> load() is rejected; standard globals only. starlark's
+        # name resolver rejects any reference to an unregistered name here, so a
+        # rule calling a credential primitive (secret/mint/crypto -- absent from
+        # RULE_PRIMITIVES) fails to compile; translate that into a targeted hint.
+        try:
+            starlark.eval(module, ast, _GLOBALS)
+        except Exception as e:
+            if kind == "rule":
+                hint = _rule_compile_hint(e)
+                if hint is not None:
+                    raise ValueError(hint) from e
+            raise
         self._frozen = module.freeze()
 
     @property

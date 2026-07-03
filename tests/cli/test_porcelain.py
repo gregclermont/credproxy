@@ -1218,3 +1218,24 @@ def test_mount_add_alias_resolves_default(xdg, workspaces_dir):
     assert ec == 0, err
     raw = tomllib.loads((workspaces_dir / "ws.toml").read_text())
     assert {"volume": "cache", "target": "/c"} in raw["mounts"]
+
+
+@pytest.mark.parametrize("action,flag,value", [
+    ("block", "--body", "x"),
+    ("block", "--resp-header", "K=V"),
+    ("respond", "--resp-header", "K=V"),
+    ("script", "--status", "404"),
+])
+def test_rule_add_rejects_out_of_action_flag(xdg, workspaces_dir, action, flag, value):
+    """A flag that doesn't belong to the chosen action fails at `rule add`
+    (rather than being silently dropped). The check precedes workspace
+    resolution, so no workspace setup is needed."""
+    argv = ["workspace", "w", "rule", "add", "--host", "api.github.com",
+            "--action", action, flag, value]
+    if action == "respond":
+        argv += ["--status", "200"]
+    if action == "script":
+        argv += ["--script", "scrub-emails"]
+    ec, out, err = _run(argv)
+    assert ec != 0
+    assert "does not accept" in err

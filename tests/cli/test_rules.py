@@ -62,6 +62,27 @@ def test_unknown_action_rejected(xdg, workspaces_dir):
         load_rules(ws)
 
 
+@pytest.mark.parametrize("op", [
+    'set_headers = { Host = "evil.com" }',
+    'set_headers = { host = "evil.com" }',
+    'remove_headers = ["Host"]',
+    'set_headers = { ":authority" = "evil.com" }',
+])
+def test_host_rewrite_rejected(xdg, workspaces_dir, op):
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.rules import load_rules
+    ws = _write_ws(workspaces_dir, "w", f"""
+        image = "x"
+        [[rule]]
+        name = "h"
+        hosts = ["api.github.com"]
+        action = "rewrite"
+        {op}
+    """)
+    with pytest.raises(ConfigError, match="authority|Host"):
+        load_rules(ws)
+
+
 def test_misplaced_field_rejected(xdg, workspaces_dir):
     from credproxy_cli.core.errors import ConfigError
     from credproxy_cli.core.rules import load_rules

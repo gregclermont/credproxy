@@ -253,12 +253,30 @@ class SyntheticResponse:
     headers: dict = field(default_factory=dict)
 
 
+# A rule may not touch the request AUTHORITY. Binding selection happens on the
+# pre-rewrite host, so setting or removing Host / :authority mid-pipeline would
+# ship the original host's injected credential under a different authority -- a
+# credential host-scope escape. Declarative rewrites are rejected at config load
+# (config._reject_authority_rewrite); this guards the SCRIPTED path so a rule
+# script's req_set_header("Host", ...) raises -> RuleError -> the addon's 502.
+_FORBIDDEN_REWRITE_HEADERS = frozenset({"host", ":authority"})
+
+
+def _reject_authority_header(name: str) -> None:
+    if name.lower() in _FORBIDDEN_REWRITE_HEADERS:
+        raise ValueError(
+            f"a rule may not rewrite the request authority header {name!r} "
+            f"(Host/:authority): it would send the injected credential under a "
+            f"different host than the binding is scoped to")
+
+
 class RuleRequestCtx(RequestCtx):
     """Request-phase surface for a rule. Reuses the injection RequestCtx read/
     mutate primitives (so scripted rules share the flat `req_*` primitive API)
     but carries NO secret -- `secret()` is unreachable because the rule Starlark
     profile omits it, and this ctx is constructed with an empty secret map. Adds
-    `header_del` and the terminal `block`/`respond` sinks."""
+    `header_del` and the terminal `block`/`respond` sinks. Overrides
+    `header_set`/`header_del` to reject Host/:authority mutation (scope escape)."""
 
     phase = "request"
 
@@ -266,7 +284,12 @@ class RuleRequestCtx(RequestCtx):
         super().__init__(request, {}, {}, None)
         self.pending: SyntheticResponse | None = None
 
+    def header_set(self, name: str, value: str) -> None:
+        _reject_authority_header(name)
+        super().header_set(name, value)
+
     def header_del(self, name: str) -> None:
+        _reject_authority_header(name)
         if name in self._req.headers:
             del self._req.headers[name]
 

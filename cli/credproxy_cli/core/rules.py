@@ -42,7 +42,11 @@ def _noop(_msg: str) -> None:
 ACTIONS = ("block", "respond", "rewrite", "script")
 _TERMINAL_ACTIONS = ("block", "respond")
 # Fields allowed per action (plus the common set); an unexpected field is a
-# validation error, mirroring proxy/config._RULE_ACTION_FIELDS.
+# validation error, mirroring proxy/config._RULE_ACTION_FIELDS. NOTE the one
+# intentional asymmetry: the proxy's `script` set also allows `script_source`
+# (the .star body), which the CLI never writes in TOML -- it is injected at
+# wire time by rule_wire_entries (via find_script). So this TOML-facing set
+# stays {script, api}; don't "sync" script_source in here.
 _COMMON_FIELDS = frozenset({"name", "hosts", "methods", "path", "action", "visible"})
 _ACTION_FIELDS = {
     "block": frozenset({"status"}),
@@ -54,6 +58,11 @@ _ACTION_FIELDS = {
 # Per-family default for the `visible` flag (mirrors proxy).
 _VISIBLE_DEFAULT = {"block": True, "respond": True, "rewrite": False,
                     "script": False}
+# A rewrite may not touch the request authority (Host/:authority): binding
+# selection happens on the pre-rewrite host, so it would ship the injected
+# credential under a different host -- a scope escape. Mirrors
+# proxy/config._FORBIDDEN_REWRITE_HEADERS; rejected at `rule add`.
+_FORBIDDEN_REWRITE_HEADERS = frozenset({"host", ":authority"})
 
 # The `[[rule]]` table header (a trailing comment is allowed) -- fed to the
 # generic, array-depth-aware block machinery shared with bindings.
@@ -300,6 +309,14 @@ def validate(rules: list[Rule], source: str) -> None:
                                           or r.resp_set_headers or r.resp_remove_headers):
             raise ConfigError(f"{source}: rule '{r.name}': action 'rewrite' needs "
                               f"at least one header operation")
+        if r.action == "rewrite":
+            for hn in list(r.set_headers or {}) + list(r.remove_headers or ()):
+                if hn.lower() in _FORBIDDEN_REWRITE_HEADERS:
+                    raise ConfigError(
+                        f"{source}: rule '{r.name}': a rewrite may not touch the "
+                        f"request authority header '{hn}' (Host/:authority) -- it "
+                        f"would send the injected credential under a different "
+                        f"host than the binding is scoped to")
         if r.action == "script":
             if not r.script:
                 raise ConfigError(f"{source}: rule '{r.name}': action 'script' "

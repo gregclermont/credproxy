@@ -119,6 +119,13 @@ script = "scrub-emails"       # resolved via the three-tier scripts registry
 There is no query/body *matching* and no declarative body *rewrite* in v1 — the
 `script` action covers those rare cases.
 
+A rewrite cannot touch the request **authority**: setting or removing `Host` (or
+`:authority`) is rejected — declaratively at `rule add`, and at runtime for a
+scripted `req_set_header("Host", …)` (which fails closed with a 502). Binding
+selection happens on the pre-rewrite host, so rewriting the authority would send
+the injected credential under a different host than the binding is scoped to.
+Scope is pinned by the host match, not mutable per request.
+
 ## Visibility (`visible`)
 
 One per-rule flag bundles two disclosures:

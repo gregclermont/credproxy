@@ -74,6 +74,14 @@ class HostnameLogger:
         rule_markers, terminated = self._apply_request_rules(
             flow, creds, host, req.method, path)
         if terminated:
+            # A terminal request rule (block/respond, or the fail-closed 502)
+            # decided this flow and set flow.response. mitmproxy still fires
+            # response() for that synthetic response, so mark the flow: a
+            # terminated request has no upstream to govern, and a later response
+            # rule must NEVER undo the terminal decision (first-terminal-wins).
+            # Both terminal exits of _apply_request_rules set flow.response, so
+            # this single check covers the clean block/respond path AND the 502.
+            flow.metadata["credproxy_rule_terminated"] = True
             return
 
         applied: list[str] = []
@@ -132,6 +140,11 @@ class HostnameLogger:
         non-terminal rule markers for the caller to fold into its own `[http]`
         line, `terminated` tells the caller to stop (skip injection). A script
         failure fails CLOSED toward the policy (a 502, terminated)."""
+        # Rules match against the PRE-rewrite host/path: `host`/`path` are captured
+        # before any rewrite runs. That's correct today (a rewrite can't touch the
+        # request line -- only headers, and Host rewrites are rejected), but if a
+        # path-rewrite action is ever added, decide matching semantics explicitly
+        # rather than letting a rewrite silently re-target later rules.
         rule_set = creds.rule_set()
         matched = rule_set.request_rules(method, host, path) if rule_set else []
         if not matched:
@@ -177,6 +190,13 @@ class HostnameLogger:
         token-endpoint response is already sealed into a placeholder before any
         rule sees it). Rewrites mutate the response; a script that calls
         block/respond replaces it. A script failure fails CLOSED (a 502)."""
+        # A terminal request rule already decided this flow (block/respond/502):
+        # the response is synthetic policy output with no upstream to govern, and
+        # a response rule must NOT run -- else a later on_response script could
+        # turn a blocked request into a success, or a resp_remove_headers rule
+        # could strip X-Credproxy-Rule off a visible block. First-terminal-wins.
+        if flow.metadata.get("credproxy_rule_terminated"):
+            return
         rule_set = creds.rule_set()
         if not rule_set:
             return
@@ -186,6 +206,7 @@ class HostnameLogger:
         if not matched:
             return
         rctx = rules.RuleResponseCtx(flow)
+        rewrite_marks: list[str] = []  # folded into one [http] line at the end
         for rule in matched:
             try:
                 terminal = rules.apply_response_rule(rule, rctx)
@@ -203,13 +224,18 @@ class HostnameLogger:
                            method=req.method, path=path, outcome=rctx.pending.kind,
                            visible=rule.visible)
                 flow.response = synthetic
-                print(f"[http] {req.method} {host}{path} "
-                      f"({rctx.pending.kind}:{rule.name})", flush=True)
+                marks = rewrite_marks + [f"{rctx.pending.kind}:{rule.name}"]
+                print(f"[http] {req.method} {host}{path} ({' '.join(marks)})",
+                      flush=True)
                 return
             audit.emit("rule", rule=rule.name, action=rule.action, host=host,
                        method=req.method, path=path, outcome="rewrite",
                        visible=rule.visible)
-            print(f"[http] {req.method} {host}{path} (rewrite:{rule.name})",
+            rewrite_marks.append(f"rewrite:{rule.name}")
+        # Non-terminal response rules only: one folded [http] line (parity with
+        # the request phase, which folds its rewrite markers).
+        if rewrite_marks:
+            print(f"[http] {req.method} {host}{path} ({' '.join(rewrite_marks)})",
                   flush=True)
 
     def _synthesize(self, rule, pending: "rules.SyntheticResponse") -> http.Response:

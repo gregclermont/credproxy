@@ -365,12 +365,15 @@ def do_edit(ctx: Ctx, name: str | None) -> None:
         fail(f"editor exited with status {rc}; config left as-is")
 
     # Post-edit validation: report problems but never revert -- it's the
-    # user's file. load_config/load_bindings parse and validate without writing.
+    # user's file. load_config/load_bindings/load_rules parse and validate
+    # without writing; `[[rule]]` is part of the file this edits, so validate it.
     from ..core import bindings as core_bindings
     from ..core import config as core_config
+    from ..core import rules as core_rules
     try:
         core_config.load_config(ws)
         core_bindings.load_bindings(ws)
+        core_rules.load_rules(ws)
     except CredproxyError as e:
         say(f"warning: config is invalid — {e}")
         say("fix it before `start`/`apply`, or the workspace won't update cleanly.")
@@ -921,6 +924,27 @@ def do_rule_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         fail("`rule add` needs at least one --host")
     if a.action not in core_rules.ACTIONS:
         fail(f"`rule add` needs --action one of {', '.join(core_rules.ACTIONS)}")
+
+    # Reject action-specific flags that don't belong to the chosen action, rather
+    # than silently dropping them (`block --body`, `respond --resp-header`,
+    # `script --status`). The shared parser accepts every flag; this mirrors the
+    # proxy's misplaced-field rejection so a wrong flag fails at `rule add`, not
+    # by installing a weaker/different rule. Keyed by argparse dest -> (flag,
+    # actions it's valid for); common scoping flags are always allowed.
+    _action_flags = {
+        "status": ("--status", {"block", "respond"}),
+        "body": ("--body", {"respond"}),
+        "header": ("--header", {"respond", "rewrite"}),
+        "remove_header": ("--remove-header", {"rewrite"}),
+        "resp_header": ("--resp-header", {"rewrite"}),
+        "resp_remove_header": ("--resp-remove-header", {"rewrite"}),
+        "script": ("--script", {"script"}),
+    }
+    misused = [flag for attr, (flag, ok) in _action_flags.items()
+               if getattr(a, attr, None) is not None and a.action not in ok]
+    if misused:
+        fail(f"`rule add --action {a.action}` does not accept "
+             f"{', '.join(sorted(misused))}")
 
     kwargs: dict = {}
     if a.action == "block":

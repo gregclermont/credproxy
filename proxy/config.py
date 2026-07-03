@@ -324,6 +324,23 @@ _RULE_ACTION_FIELDS = {
 _VISIBLE_DEFAULT = {"block": True, "respond": True, "rewrite": False,
                     "script": False}
 
+# A rewrite may not touch the request AUTHORITY. Binding selection happens on the
+# pre-rewrite host, so rewriting (or removing) Host / :authority would ship the
+# original host's injected credential under a different authority -- a credential
+# host-scope escape (on shared-IP/CDN backends, the real leak). Rejected at load;
+# the CLI mirrors at `rule add`, and RuleRequestCtx blocks the scripted path.
+_FORBIDDEN_REWRITE_HEADERS = frozenset({"host", ":authority"})
+
+
+def _reject_authority_rewrite(set_headers, remove_headers, source: str,
+                              where: str) -> None:
+    for name in list(set_headers or {}) + list(remove_headers or ()):
+        if name.lower() in _FORBIDDEN_REWRITE_HEADERS:
+            _fail(f"{source}: {where} may not rewrite the request authority "
+                  f"header '{name}' (Host/:authority): it would send the injected "
+                  f"credential under a different host than the binding is scoped "
+                  f"to -- scope is pinned by the host match")
+
 
 def _str_map(value, source: str, where: str) -> dict:
     """Validate a header map (str -> str, both non-empty). Header NAMES may be
@@ -489,6 +506,8 @@ def _load_rules(raw_rules, source: str) -> RuleSet:
                                           if rsh is not None else None)
             kwargs["resp_remove_headers"] = (_str_list(rrh, source, f"{where}.resp_remove_headers")
                                              if rrh is not None else None)
+            _reject_authority_rewrite(kwargs["set_headers"],
+                                      kwargs["remove_headers"], source, where)
         elif action == "script":
             scheme, script_name = _build_rule_scheme(entry, source, where)
 
