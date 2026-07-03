@@ -530,3 +530,43 @@ def test_oauth2_reseal_infinite_expires_in_uses_fallback_ttl():
     assert len(creds.transforms_for("api.example.com")) == 1     # minted
     clock[0] = 101.0
     assert creds.transforms_for("api.example.com") == []         # expired (not permanent)
+
+
+# ---- audit attribution: the minted transform names its SOURCE binding --------
+
+def test_runtime_minter_names_transform_with_source_binding():
+    creds = config.BindingCredentials({})
+    minter = config.RuntimeMinter(creds, lambda: "credproxy_PH",
+                                  source_binding="gh-token")
+    minter.mint("TOKEN", 3600, ["api.example.com"])
+    [tr] = creds.transforms_for("api.example.com")
+    assert tr.name == "reseal:gh-token"          # NOT the placeholder prefix
+
+
+def test_reseal_audit_correlates_source_binding(capsys):
+    # Drive the token round-trip AND an API-host request through the addon, then
+    # assert the later injection of the minted placeholder audits `reseal:oauth`
+    # -- correlatable with the `reseal` mint event's `oauth` binding.
+    creds = _reseal_creds()
+    log = addon.HostnameLogger(SimpleNamespace(creds=creds))
+
+    tf = tflow.tflow(
+        req=tutils.treq(host="oauth.example.com", method=b"POST", path=b"/token",
+                        content=b"grant_type=client_credentials&client_secret=cs_PH"),
+        resp=True)
+    tf.response.status_code = 200
+    tf.response.text = json.dumps({"access_token": "MINTED", "expires_in": 3600})
+    log.request(tf)                       # token-endpoint request: injects + fires
+    log.response(tf)                      # mints the placeholder (source=oauth)
+    ph = json.loads(tf.response.text)["access_token"]
+
+    af = tflow.tflow(req=tutils.treq(host="api.example.com", method=b"GET",
+                                     path=b"/v1/x"))
+    af.request.headers["Authorization"] = "Bearer " + ph
+    log.request(af)                       # API-host request: runtime swap fires
+
+    events = [json.loads(l[len("[audit] "):]) for l in
+              capsys.readouterr().out.splitlines() if l.startswith("[audit] ")]
+    assert any(e["event"] == "reseal" and e["binding"] == "oauth" for e in events)
+    assert any(e["event"] == "inject" and e["binding"] == "reseal:oauth"
+               for e in events)          # correlatable, not a synthetic ph id

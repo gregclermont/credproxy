@@ -257,6 +257,21 @@ def test_match_rules_first_terminal_wins():
     assert [x.name for x in m2] == ["rw", "never"]
 
 
+def test_match_rules_response_only_script_continues():
+    # A response-only script (scrub-emails) has no request-phase effect, so it must
+    # NOT stop the dry-run: a following block has to be reported.
+    from credproxy_cli.core.rules import Rule, match_rules
+    rules = [
+        Rule(name="scrub", hosts=("api.github.com",), action="script",
+             script="scrub-emails", path="/users/**"),
+        Rule(name="blk", hosts=("api.github.com",), action="block"),
+    ]
+    m = match_rules(rules, "GET", "api.github.com", "/users/x")
+    assert [x.name for x in m] == ["scrub", "blk"]
+    assert m[0].terminal is False          # response-only script: non-terminal
+    assert m[1].terminal is True
+
+
 def test_match_rules_path_and_host_glob():
     from credproxy_cli.core.rules import Rule, match_rules
     rules = [Rule(name="r", hosts=("sts.*.amazonaws.com",), action="block",

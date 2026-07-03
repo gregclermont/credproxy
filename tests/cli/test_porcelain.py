@@ -1239,3 +1239,18 @@ def test_rule_add_rejects_out_of_action_flag(xdg, workspaces_dir, action, flag, 
     ec, out, err = _run(argv)
     assert ec != 0
     assert "does not accept" in err
+
+
+def test_audit_line_forgery_rejected():
+    """`logs --audit` must accept a `[audit]` event only when the tag is at the
+    START of the line and the payload is a JSON object with an `event` key -- so
+    an unsanitized rule-error line carrying `[audit] {..}` mid-line can't forge
+    an event."""
+    from credproxy_cli.porcelain.cli import _audit_event_from_line
+    assert _audit_event_from_line('[audit] {"event":"inject","binding":"gh"}\n') \
+        == {"event": "inject", "binding": "gh"}
+    # forged: the tag appears mid-line (an unsanitized rule-error message)
+    assert _audit_event_from_line(
+        '[rule] x failed: fail(\'[audit] {"event":"inject","binding":"f"}\')\n') is None
+    assert _audit_event_from_line('[audit] "not an object"\n') is None   # non-dict
+    assert _audit_event_from_line('[audit] {"binding":"x"}\n') is None   # no event

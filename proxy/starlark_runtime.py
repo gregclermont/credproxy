@@ -517,8 +517,21 @@ def _rule_compile_hint(err: Exception) -> str | None:
     return None
 
 
-_HAS_ON_RESPONSE = re.compile(r"(?m)^def[ \t]+on_response\b")
-_HAS_ON_REQUEST = re.compile(r"(?m)^def[ \t]+on_request\b")
+# Detect which top-level hooks a script defines. starlark-pyo3 exposes NO symbol
+# introspection (the frozen module has only `call`; the AST/typecheck Interface
+# is opaque), so this is a lexical scan. The one false-positive vector for a
+# `(?m)^def` scan is a TRIPLE-quoted string whose content starts a line with
+# `def on_request():` (a single-line string or `#` comment can't put `def` at
+# column 0), so we blank triple-quoted strings first -- preserving newlines so
+# line-anchoring is unaffected. Getting this wrong 502s every matching request
+# (the runtime would call a nonexistent export).
+_TRIPLE_STRING_RE = re.compile(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'')
+
+
+def _defines_hook(source: str, hook: str) -> bool:
+    stripped = _TRIPLE_STRING_RE.sub(
+        lambda m: "\n" * m.group(0).count("\n"), source)
+    return re.search(rf"(?m)^def[ \t]+{hook}\b", stripped) is not None
 
 
 class ScriptResponseError(Exception):
@@ -562,8 +575,8 @@ class ScriptedScheme:
         # Deadline for cooperative cancellation; enforced only when the call
         # path supports check_cancelled (see module docstring).
         self._timeout = timeout
-        self._has_on_response = bool(_HAS_ON_RESPONSE.search(source))
-        self._has_on_request = bool(_HAS_ON_REQUEST.search(source))
+        self._has_on_response = _defines_hook(source, "on_response")
+        self._has_on_request = _defines_hook(source, "on_request")
 
         if kind == "rule":
             # Credential-bearing primitives are absent from RULE_PRIMITIVES, so

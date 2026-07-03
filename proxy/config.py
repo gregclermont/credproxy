@@ -224,9 +224,16 @@ class RuntimeMinter:
     config; the instance is injected into ResponseCtx so schemes.py stays free
     of a config import."""
 
-    def __init__(self, creds: "BindingCredentials", generate_placeholder):
+    def __init__(self, creds: "BindingCredentials", generate_placeholder,
+                 source_binding: str | None = None):
         self._creds = creds
         self._generate = generate_placeholder
+        # The re-seal binding this mint is on behalf of. Named into the runtime
+        # transform so the LATER injection audit event (when the minted
+        # placeholder is used on an API host) carries `reseal:<source>` and can be
+        # correlated with the earlier `reseal` mint event's binding name. Without
+        # it the injection would audit an uncorrelatable synthetic placeholder id.
+        self._source_binding = source_binding
 
     def mint(self, value: str, ttl: float | None, api_hosts, header: str = "Authorization") -> str:
         if not api_hosts:
@@ -237,8 +244,10 @@ class RuntimeMinter:
         if ttl is not None and (not math.isfinite(ttl) or ttl < 0):
             raise ValueError(f"mint ttl must be a non-negative finite number (got {ttl!r})")
         placeholder = self._generate()
+        name = (f"reseal:{self._source_binding}" if self._source_binding
+                else f"reseal:{placeholder[:16]}")
         transform = Transform(
-            name=f"reseal:{placeholder[:16]}",
+            name=name,
             scheme=schemes.SCHEMES["bearer"],
             params={"header": header},
             placeholder=placeholder,

@@ -536,14 +536,9 @@ def _logs_audit(ws: Workspace, as_json: bool) -> None:
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
-            idx = line.find(_AUDIT_TAG)
-            if idx < 0:
+            event = _audit_event_from_line(line)
+            if event is None:
                 continue
-            payload = line[idx + len(_AUDIT_TAG):].strip()
-            try:
-                event = json.loads(payload)
-            except json.JSONDecodeError:
-                continue  # a malformed/truncated audit line: skip, don't crash
             if as_json:
                 print(json.dumps(event), flush=True)
             else:
@@ -555,6 +550,25 @@ def _logs_audit(ws: Workspace, as_json: bool) -> None:
         rc = proc.wait()
     if not interrupted and rc:
         fail(f"docker logs exited with status {rc}")
+
+
+def _audit_event_from_line(line: str) -> dict | None:
+    """Parse one `docker logs` line into an audit event, or None if it isn't a
+    genuine one. Requires the `[audit] ` tag at the START of the line -- NOT
+    anywhere in it: audit.emit() prints the tag at column 0, but rule-error lines
+    are unsanitized, so a rule script `fail('[audit] {..}')` would otherwise let a
+    mid-line substring FORGE an event. Also requires a JSON object carrying an
+    `event` key, so a crafted `[audit] "not an object"` can't slip through."""
+    import json
+    if not line.startswith(_AUDIT_TAG):
+        return None
+    try:
+        event = json.loads(line[len(_AUDIT_TAG):].strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(event, dict) or "event" not in event:
+        return None
+    return event
 
 
 def _format_audit_event(e: dict) -> str:

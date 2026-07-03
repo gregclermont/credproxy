@@ -480,3 +480,19 @@ def test_builtin_scrub_emails_passthrough_non_object():
     flow.response.text = json.dumps("just a string")
     log.response(flow)
     assert json.loads(flow.response.text) == "just a string"
+
+
+def test_docstring_def_not_misclassified_as_request_hook():
+    # A response-only script whose DOCSTRING contains a column-0 `def on_request():`
+    # must NOT be treated as request-active -- else the runtime calls a nonexistent
+    # export and 502s every matching request. Hook detection blanks triple strings.
+    src = ('def on_response():\n'
+           '    """\n'
+           'def on_request(): not a real def, inside a docstring\n'
+           '    """\n'
+           '    return\n')
+    creds = _creds([_script_rule("s", src, path="/users/**")])
+    log = addon.HostnameLogger(_state(creds))
+    flow = _flow(host="api.github.com", path="/users/x")   # resp=False
+    log.request(flow)
+    assert flow.response is None            # passed through, NOT a 502

@@ -471,16 +471,46 @@ class RuleMatch:
     visible: bool
 
 
+# Mirror of proxy/starlark_runtime._defines_hook: does the script define a
+# top-level `def <hook>`? Blank triple-quoted strings first so a docstring line
+# like `def on_request():` doesn't misclassify a response-only script (the proxy
+# uses the identical scan, so `rule test` agrees with it on a script's phase).
+_TRIPLE_STRING_RE = re.compile(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'')
+
+
+def _defines_hook(source: str, hook: str) -> bool:
+    stripped = _TRIPLE_STRING_RE.sub(
+        lambda m: "\n" * m.group(0).count("\n"), source)
+    return re.search(rf"(?m)^def[ \t]+{hook}\b", stripped) is not None
+
+
+def _script_is_request_active(rule: Rule) -> bool:
+    """Whether a script rule can run in the REQUEST phase (defines on_request).
+    A response-only script has no request-phase effect, so it does not stop the
+    request dry-run. Conservatively assume request-active if the source can't be
+    read (better to over-report a possible stop than to hide one)."""
+    from .scripts import find_script
+    try:
+        return _defines_hook(find_script(rule.script).source, "on_request")
+    except CredproxyError:
+        return True
+
+
 def match_rules(rules: list[Rule], method: str, host: str, path: str) -> list[RuleMatch]:
     """The rules that match a request, in declaration order, up to and including
-    the first terminal one. A `script` is reported as possibly-terminal (the
-    proxy decides at runtime), so evaluation does not continue past it -- the
-    dry-run can't know what the script will do."""
+    the first terminal one. A `script` is possibly-terminal ONLY if it can run in
+    the request phase (defines on_request) -- the proxy decides at runtime, so we
+    stop there. A response-only script (e.g. a scrubber) has no request-phase
+    effect, so it is non-terminal and evaluation continues -- otherwise a later
+    `block` would be hidden from the dry-run."""
     out: list[RuleMatch] = []
     for r in rules:
         if not _matches(r, method, host, path):
             continue
-        terminal = r.action in _TERMINAL_ACTIONS or r.action == "script"
+        if r.action == "script":
+            terminal = _script_is_request_active(r)
+        else:
+            terminal = r.action in _TERMINAL_ACTIONS
         out.append(RuleMatch(r.name, r.action, terminal, r.effective_visible))
         if terminal:
             break

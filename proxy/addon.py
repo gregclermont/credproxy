@@ -291,8 +291,13 @@ class HostnameLogger:
             # fresh transforms_for() lookup -- so a config swap that landed between
             # the token request and this response can't drop the binding and let
             # the real token through.
-            minter = RuntimeMinter(creds, placeholders.generate)
             for t in fired:
+                # Per-binding minter so the runtime transform it registers is
+                # named `reseal:<this binding>` -- the later injection audit (when
+                # the minted placeholder is used on an API host) then correlates
+                # with this binding's `reseal` mint event below.
+                minter = RuntimeMinter(creds, placeholders.generate,
+                                       source_binding=t.name)
                 # ResponseCtx wraps the whole flow: a re-seal scheme can read the
                 # request it answered (host/path) AND read/mutate the response.
                 ctx = ResponseCtx(flow, t.secrets, t.params, t.placeholder,
