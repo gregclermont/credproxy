@@ -610,3 +610,40 @@ def test_dry_run_request_active_script_gates_later_rule():
     m = creds.rule_set().dry_run("GET", "api.github.com", "/x")
     assert m[0]["phase"] == "request" and m[0]["may_terminate"] is True
     assert m[1]["terminal"] is True and m[1]["conditional"] is True   # gated on rw
+
+
+# ---- review round: empty rewrite, hidden-respond attribution, audit visible ---
+
+def test_rewrite_empty_container_rejected():
+    # A present-but-empty op ([] / {}) does nothing but would flip the host to
+    # intercepted -- rejected, like an empty `methods`.
+    with pytest.raises(ConfigError, match="NON-EMPTY|at least one"):
+        _creds([{"name": "r", "hosts": ["h.example.com"], "action": "rewrite",
+                 "remove_headers": []}])
+    with pytest.raises(ConfigError, match="NON-EMPTY|at least one"):
+        _creds([{"name": "r", "hosts": ["h.example.com"], "action": "rewrite",
+                 "set_headers": {}}])
+
+
+def test_hidden_respond_strips_forged_attribution():
+    # A HIDDEN respond must never self-identify: an X-Credproxy-Rule the script's
+    # respond(...) headers set (any case) is stripped, so it can't forge
+    # attribution to another rule.
+    src = ('def on_request():\n'
+           '    respond(200, "x", {"x-credproxy-rule": "some-other-rule"})\n')
+    creds = _creds([_script_rule("h", src, visible=False)])
+    log = addon.HostnameLogger(_state(creds))
+    flow = _flow()
+    log.request(flow)
+    assert flow.response.status_code == 200
+    assert "X-Credproxy-Rule" not in flow.response.headers
+
+
+def test_rule_error_audit_carries_visible(capsys):
+    creds = _creds([_script_rule("boom", "def on_request():\n    fail('x')\n",
+                                 visible=False)])
+    log = addon.HostnameLogger(_state(creds))
+    log.request(_flow())
+    err = [e for e in _records(capsys.readouterr().out, "audit")
+           if e["event"] == "rule" and e["outcome"] == "error"]
+    assert err and err[0]["visible"] is False

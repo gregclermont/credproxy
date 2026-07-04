@@ -360,3 +360,18 @@ def test_remove_rule_with_child_table(xdg, workspaces_dir):
     remove_rule(ws, "r1")
     assert [r.name for r in load_rules(ws)] == ["r2"]      # file still valid
     assert "[rule.headers]" not in ws.config_path.read_text()
+
+
+def test_rewrite_empty_container_rejected(xdg, workspaces_dir):
+    from credproxy_cli.core.errors import ConfigError
+    from credproxy_cli.core.rules import load_rules
+    ws = _write_ws(workspaces_dir, "w", """
+        image = "x"
+        [[rule]]
+        name = "r"
+        hosts = ["api.example.com"]
+        action = "rewrite"
+        remove_headers = []
+    """)
+    with pytest.raises(ConfigError, match="NON-EMPTY|at least one"):
+        load_rules(ws)

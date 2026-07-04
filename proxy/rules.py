@@ -125,13 +125,7 @@ class Rule:
     resp_remove_headers: tuple[str, ...] | None = None
     # action="script"
     scheme: object | None = None            # a ScriptedScheme (kind="rule")
-    script_name: str | None = None
-
-    @property
-    def terminal_declared(self) -> bool:
-        """True if the action is unconditionally terminal (block/respond). A
-        `script` is terminal only at runtime, if it calls block()/respond()."""
-        return self.action in TERMINAL_ACTIONS
+    script_name: str | None = None          # for /admin/rule-test attribution
 
     @property
     def affects_request(self) -> bool:

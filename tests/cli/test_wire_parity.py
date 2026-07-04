@@ -137,6 +137,7 @@ def test_rule_constants_parity():
     proxy_config = _proxy_module("config")
     proxy_rules = _proxy_module("rules")
     assert cli_rules._VISIBLE_DEFAULT == proxy_config._VISIBLE_DEFAULT
+    # _FORBIDDEN_REWRITE_HEADERS lives once on the proxy (rules.py; config.py
+    # references it), so only the CLI mirror needs a parity assertion.
     assert cli_rules._FORBIDDEN_REWRITE_HEADERS \
-        == proxy_config._FORBIDDEN_REWRITE_HEADERS \
         == proxy_rules._FORBIDDEN_REWRITE_HEADERS

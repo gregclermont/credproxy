@@ -1,8 +1,8 @@
 # A rule script (kind="rule"): scrub the `email` field from response bodies so
 # the workspace never sees it. Wire it with:
 #
-#   credproxy workspace NAME rule add --host api.github.com --path '/users/**' \
-#       --action script --script scrub-emails
+#   credproxy workspace NAME rule add script --host api.github.com \
+#       --path '/users/**' --script scrub-emails
 #
 # Rule scripts hold NO credential -- the secret/mint/crypto primitives are
 # unavailable, and errors are reported in full (unlike injector scripts). This

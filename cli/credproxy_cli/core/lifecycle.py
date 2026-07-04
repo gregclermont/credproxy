@@ -1070,17 +1070,21 @@ def _compute_drift(
 
 
 def _rules_drift(ws: Workspace, current_rules: list, running: bool) -> list:
-    """Rule drift against applied-rules.json, keyed by name. Robust to an
-    unresolved script (surfaced as a single 'rules unresolved' item rather than
-    crashing inspect/apply)."""
-    from .errors import CredproxyError
-    from .rules import rule_wire_entries
+    """Rule drift against applied-rules.json, keyed by name. inspect/apply parse
+    rules WITHOUT validate() (so they don't crash on a config the push path would
+    reject), so validate() HERE and surface any config error -- a duplicate name,
+    a bad host/path glob, an unresolved script -- as a single drift item, rather
+    than silently mis-computing drift (e.g. a name-keyed dict collapsing two
+    duplicate-named rules). Keeps inspect from being more lenient than push."""
+    from .errors import ConfigError, CredproxyError
+    from .rules import rule_wire_entries, validate
 
     out: list[DriftItem] = []
     try:
+        validate(current_rules, str(ws.config_path))
         current = {e["name"]: e for e in rule_wire_entries(current_rules)}
-    except CredproxyError as e:
-        return [DriftItem(kind="rules", item=f"rules unresolved ({e})",
+    except (ConfigError, CredproxyError) as e:
+        return [DriftItem(kind="rules", item=f"rules invalid ({e})",
                           applied=None, configured=None)]
 
     applied = _load_applied_rules(ws)
@@ -1168,9 +1172,8 @@ def inspect_workspace(ws: Workspace) -> WorkspaceInspect:
         for b in parsed
     )
 
-    from .rules import _parse_rules as _parse_rules_r
-    from .rules import _with_auto_names as _with_auto_names_r
-    current_rules = _with_auto_names_r(_parse_rules_r(raw, str(ws.config_path)))
+    from .rules import named_rules_from_raw
+    current_rules = named_rules_from_raw(raw, str(ws.config_path))
 
     drift = _compute_drift(ws, cfg, bindings, running, current_rules=current_rules)
 
@@ -1245,9 +1248,8 @@ def apply_config(ws: Workspace, notify: Notify = _noop) -> ApplyResult:
         for b in current_bindings_parsed
     ]
 
-    from .rules import _parse_rules as _parse_rules_r
-    from .rules import _with_auto_names as _with_auto_names_r
-    current_rules = _with_auto_names_r(_parse_rules_r(raw, str(ws.config_path)))
+    from .rules import named_rules_from_raw
+    current_rules = named_rules_from_raw(raw, str(ws.config_path))
 
     drift = _compute_drift(ws, cfg, current_binding_summaries, running=True,
                            current_rules=current_rules)

@@ -173,7 +173,8 @@ class HostnameLogger:
                 log.emit("rule-error", rule=rule.name, host=host, method=method,
                          path=path, error=str(e))
                 audit.emit("rule", rule=rule.name, action=rule.action, host=host,
-                           method=method, path=path, outcome="error")
+                           method=method, path=path, outcome="error",
+                           visible=rule.visible)
                 flow.response = http.Response.make(
                     502, f"credproxy: rule '{rule.name}' failed\n".encode(),
                     {"Content-Type": "text/plain"})
@@ -274,6 +275,12 @@ class HostnameLogger:
         else:  # respond -- author-supplied body kept verbatim
             if rule.visible:
                 headers["X-Credproxy-Rule"] = rule.name
+            else:
+                # A HIDDEN rule must never self-identify: strip any X-Credproxy-Rule
+                # the author's `respond(...)` headers tried to set (case-insensitive,
+                # so it can't forge attribution to another rule's name either).
+                for k in [k for k in headers if k.lower() == "x-credproxy-rule"]:
+                    del headers[k]
         return http.Response.make(
             pending.status,
             body.encode("utf-8") if isinstance(body, str) else body,

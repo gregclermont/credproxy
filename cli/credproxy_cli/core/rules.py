@@ -189,9 +189,10 @@ def _parse_rule_entry(r: dict, source: str, where: str) -> Rule:
     elif action == "rewrite":
         sh, rh = r.get("set_headers"), r.get("remove_headers")
         rsh, rrh = r.get("resp_set_headers"), r.get("resp_remove_headers")
-        if sh is None and rh is None and rsh is None and rrh is None:
+        # Truthiness, not `is None`: a present-but-empty op ({} / []) does nothing.
+        if not (sh or rh or rsh or rrh):
             raise ConfigError(f"{source}: {where} action 'rewrite' needs at "
-                              f"least one of set_headers/remove_headers/"
+                              f"least one NON-EMPTY of set_headers/remove_headers/"
                               f"resp_set_headers/resp_remove_headers")
         kwargs["set_headers"] = (_as_str_map(sh, source, f"{where}.set_headers")
                                  if sh is not None else None)
@@ -306,12 +307,20 @@ def validate(rules: list[Rule], source: str) -> None:
                 raise ConfigError(f"{source}: rule '{r.name}': {e}")
 
 
+def named_rules_from_raw(raw: dict, source: str) -> list[Rule]:
+    """Parse the `[[rule]]` array and fill auto-names, WITHOUT cross-rule
+    validation -- the one public parse-and-name entry point (don't reach into
+    `_parse_rules`/`_with_auto_names`). Used by inspect/apply, which compute drift
+    and must tolerate a config that `validate` would reject (e.g. a duplicate
+    name); the push path (`load_rules`) is where validation fails."""
+    return _with_auto_names(_parse_rules(raw, source))
+
+
 def load_rules(ws: Workspace) -> list[Rule]:
     """Parse + validate the workspace's `[[rule]]` array (auto-names filled
     in-memory). Raises ConfigError on failure."""
-    raw = tomllib.loads(ws.config_path.read_text())
     source = str(ws.config_path)
-    rules = _with_auto_names(_parse_rules(raw, source))
+    rules = named_rules_from_raw(tomllib.loads(ws.config_path.read_text()), source)
     validate(rules, source)
     return rules
 

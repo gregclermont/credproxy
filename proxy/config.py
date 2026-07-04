@@ -353,18 +353,15 @@ _RULE_ACTION_FIELDS = {
 _VISIBLE_DEFAULT = {"block": True, "respond": True, "rewrite": False,
                     "script": False}
 
-# A rewrite may not touch the request AUTHORITY. Binding selection happens on the
-# pre-rewrite host, so rewriting (or removing) Host / :authority would ship the
-# original host's injected credential under a different authority -- a credential
-# host-scope escape (on shared-IP/CDN backends, the real leak). Rejected at load;
-# the CLI mirrors at `rule add`, and RuleRequestCtx blocks the scripted path.
-_FORBIDDEN_REWRITE_HEADERS = frozenset({"host", ":authority"})
-
-
+# A rewrite may not touch the request AUTHORITY (Host / :authority): it would ship
+# the original host's injected credential under a different authority -- a
+# credential host-scope escape. Rejected at load; the CLI mirrors at `rule add`,
+# and RuleRequestCtx blocks the scripted path. The name set lives once in rules.py
+# (this is the same proxy deploy unit) -- reference it, don't re-declare.
 def _reject_authority_rewrite(set_headers, remove_headers, source: str,
                               where: str) -> None:
     for name in list(set_headers or {}) + list(remove_headers or ()):
-        if name.lower() in _FORBIDDEN_REWRITE_HEADERS:
+        if name.lower() in rules_mod._FORBIDDEN_REWRITE_HEADERS:
             _fail(f"{source}: {where} may not rewrite the request authority "
                   f"header '{name}' (Host/:authority): it would send the injected "
                   f"credential under a different host than the binding is scoped "
@@ -523,9 +520,12 @@ def _load_rules(raw_rules, source: str) -> RuleSet:
             rh = entry.get("remove_headers")
             rsh = entry.get("resp_set_headers")
             rrh = entry.get("resp_remove_headers")
-            if sh is None and rh is None and rsh is None and rrh is None:
-                _fail(f"{source}: {where} action 'rewrite' needs at least one of "
-                      f"set_headers/remove_headers/resp_set_headers/"
+            # A present-but-EMPTY op ({} / []) is `not None` but does nothing, so
+            # test truthiness -- else an empty rewrite loads clean yet only flips
+            # the host to intercepted (parity with the `methods` non-empty check).
+            if not (sh or rh or rsh or rrh):
+                _fail(f"{source}: {where} action 'rewrite' needs at least one "
+                      f"NON-EMPTY of set_headers/remove_headers/resp_set_headers/"
                       f"resp_remove_headers")
             kwargs["set_headers"] = (_str_map(sh, source, f"{where}.set_headers")
                                      if sh is not None else None)
