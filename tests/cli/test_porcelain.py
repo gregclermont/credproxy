@@ -1256,16 +1256,44 @@ def test_rule_add_no_action_fails(xdg, workspaces_dir):
     assert ec != 0
 
 
-def test_audit_line_forgery_rejected():
-    """`logs --audit` must accept a `[audit]` event only when the tag is at the
-    START of the line and the payload is a JSON object with an `event` key -- so
-    an unsanitized rule-error line carrying `[audit] {..}` mid-line can't forge
-    an event."""
-    from credproxy_cli.porcelain.cli import _audit_event_from_line
-    assert _audit_event_from_line('[audit] {"event":"inject","binding":"gh"}\n') \
-        == {"event": "inject", "binding": "gh"}
-    # forged: the tag appears mid-line (an unsanitized rule-error message)
-    assert _audit_event_from_line(
-        '[rule] x failed: fail(\'[audit] {"event":"inject","binding":"f"}\')\n') is None
-    assert _audit_event_from_line('[audit] "not an object"\n') is None   # non-dict
-    assert _audit_event_from_line('[audit] {"binding":"x"}\n') is None   # no event
+def test_logs_structured_records_are_forgery_resistant():
+    """The structured `credproxy {json}` stream can't be forged from a rule-error
+    message: the proxy JSON-encodes the (workspace-influenced) message, so it is an
+    escaped VALUE on ONE physical line -- it parses as kind=rule-error, never as a
+    second audit line."""
+    import json
+    from credproxy_cli.porcelain.cli import _parse_credproxy_line
+    # genuine audit record
+    assert _parse_credproxy_line(
+        'credproxy {"ts":"t","kind":"audit","event":"inject","binding":"gh"}\n') \
+        == {"ts": "t", "kind": "audit", "event": "inject", "binding": "gh"}
+    # a rule error whose message tries to forge an audit event -- as the proxy
+    # actually emits it: json.dumps escapes the newline, so it stays ONE line.
+    forged = 'boom\ncredproxy {"kind":"audit","event":"inject","binding":"forged"}'
+    line = "credproxy " + json.dumps(
+        {"ts": "t", "kind": "rule-error", "rule": "x", "error": forged})
+    assert "\n" not in line                        # newline escaped -> single line
+    assert _parse_credproxy_line(line + "\n")["kind"] == "rule-error"   # not audit
+    # non-prefixed / non-object / no-kind lines are rejected
+    assert _parse_credproxy_line(
+        '[rule] x failed: credproxy {"kind":"audit"}\n') is None
+    assert _parse_credproxy_line('credproxy "not an object"\n') is None
+    assert _parse_credproxy_line('credproxy {"no":"kind"}\n') is None
+
+
+def test_format_record_handles_every_kind():
+    """The `logs` reformatter renders each record kind and never crashes on a
+    missing key or an unknown/future kind."""
+    from credproxy_cli.porcelain.cli import _format_record
+    assert "inject" in _format_record(
+        {"ts": "t", "kind": "audit", "event": "inject", "binding": "gh",
+         "host": "h", "outcome": "injected"})
+    assert "rewrite:rw" in _format_record(
+        {"ts": "t", "kind": "http", "method": "GET", "host": "h", "path": "/p",
+         "marks": ["rewrite:rw"]})
+    assert "intercept" in _format_record(
+        {"ts": "t", "kind": "sni", "sni": "h", "decision": "intercept"})
+    assert "boom" in _format_record(
+        {"ts": "t", "kind": "rule-error", "rule": "x", "error": "boom"})
+    assert _format_record({"kind": "http"})              # missing keys: no crash
+    assert "weird" in _format_record({"ts": "t", "kind": "weird", "foo": "bar"})

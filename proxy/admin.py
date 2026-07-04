@@ -98,7 +98,8 @@ async def no_store(request: web.Request, handler):
 
 @web.middleware
 async def access_log(request: web.Request, handler):
-    print(f"[http] {request.method} {request.path}", flush=True)
+    import log
+    log.emit("api", method=request.method, path=request.path)
     return await handler(request)
 
 

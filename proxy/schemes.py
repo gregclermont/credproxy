@@ -520,13 +520,12 @@ class SigV4Scheme:
         # token always yields a request AWS rejects. Refuse loudly instead of
         # silently emitting a doomed signature.
         if ctx.header_get("x-amz-security-token") is not None:
-            print(
-                "[sigv4] request carries X-Amz-Security-Token (temporary "
-                "credentials); credproxy re-signs with long-term keys only -- "
-                "configure the workspace with dummy STATIC AWS credentials "
-                "(no session token). Leaving the request unsigned-as-is.",
-                flush=True,
-            )
+            import log
+            log.emit("sigv4", msg=(
+                "request carries X-Amz-Security-Token (temporary credentials); "
+                "credproxy re-signs with long-term keys only -- configure the "
+                "workspace with dummy STATIC AWS credentials (no session token). "
+                "Leaving the request unsigned-as-is."))
             return False
         # The StringToSign is keyed to the request timestamp. SDKs send
         # X-Amz-Date; a few use the Date header. Without either we can't
@@ -534,12 +533,11 @@ class SigV4Scheme:
         # timestamp.
         amz_date = ctx.header_get("x-amz-date") or ctx.header_get("date")
         if not amz_date:
-            print(
-                "[sigv4] request has no X-Amz-Date or Date header; cannot "
-                "reproduce the timestamp the request was signed with. Leaving "
-                "the request unsigned-as-is.",
-                flush=True,
-            )
+            import log
+            log.emit("sigv4", msg=(
+                "request has no X-Amz-Date or Date header; cannot reproduce the "
+                "timestamp the request was signed with. Leaving the request "
+                "unsigned-as-is."))
             return False
         ctx.header_set("Authorization", sigv4_resign(
             method=ctx.method,

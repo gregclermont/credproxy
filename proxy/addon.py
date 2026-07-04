@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from mitmproxy import http, tls
 
 import audit
+import log
 import placeholders
 import rules
 from config import RuntimeMinter
@@ -57,14 +58,13 @@ class HostnameLogger:
         try:
             intercept = self._state.creds.intercepts(sni)
         except Exception as e:
-            print(f"[sni] {sni or '<no-sni>'} intercept decision failed: {e}; "
-                  f"passthrough", flush=True)
+            log.emit("sni", sni=sni, decision="passthrough", error=str(e))
             data.ignore_connection = True
             return
         if intercept:
-            print(f"[sni] {sni} (intercept)", flush=True)
+            log.emit("sni", sni=sni, decision="intercept")
             return
-        print(f"[sni] {sni or '<no-sni>'} (passthrough)", flush=True)
+        log.emit("sni", sni=sni, decision="passthrough")
         data.ignore_connection = True
 
     def request(self, flow: http.HTTPFlow) -> None:
@@ -105,7 +105,8 @@ class HostnameLogger:
                     applied.append(t.scheme.name)
                     fired.append(t)
             except Exception as e:  # a scheme must never take the flow down
-                print(f"[scheme] {t.scheme.name} on {host} failed: {e}", flush=True)
+                log.emit("scheme", scheme=t.scheme.name, host=host,
+                         phase="request", error=str(e))
 
         # Record which bindings fired so the response hook runs on_response only
         # for them. A binding keys on its own placeholder, so only the one that
@@ -129,8 +130,8 @@ class HostnameLogger:
             # evaluated -- and the audit below keys on `candidates` too, so the
             # marker and the event must agree.
             marks.append("no-inject")
-        marker = (" (" + " ".join(marks) + ")") if marks else ""
-        print(f"[http] {req.method} {host}{path}{marker}", flush=True)
+        log.emit("http", method=req.method, host=host, path=path,
+                 marks=marks or None)
 
         # Durable audit stream (#24): one event per fired binding, plus a single
         # no-inject event when an intercepted host had candidate bindings but
@@ -165,8 +166,12 @@ class HostnameLogger:
                 # forward upstream un-governed. Fail closed.
                 synthetic = self._synthesize(rule, rctx.pending) if terminal else None
             except Exception as e:  # RuleError or a synthesis failure -> fail closed
-                # Rule scripts hold no secret, so the full cause is safe to log.
-                print(f"[rule] {rule.name} failed: {e}", flush=True)
+                # Rule scripts hold no secret, so the full cause is safe to log --
+                # and `error` is a JSON VALUE here, so a workspace-influenced
+                # message (a script `fail(req_body())`) can't spill a forged
+                # `credproxy {...}` record onto its own line (see log.py).
+                log.emit("rule-error", rule=rule.name, host=host, method=method,
+                         path=path, error=str(e))
                 audit.emit("rule", rule=rule.name, action=rule.action, host=host,
                            method=method, path=path, outcome="error")
                 flow.response = http.Response.make(
@@ -206,8 +211,8 @@ class HostnameLogger:
                                  rules.apply_request_rule,
                                  host=host, method=method, path=path)
         if r.terminated:
-            marks = r.rewrite_marks + [r.terminal_mark]
-            print(f"[http] {method} {host}{path} ({' '.join(marks)})", flush=True)
+            log.emit("http", method=method, host=host, path=path,
+                     marks=r.rewrite_marks + [r.terminal_mark])
             return [], True                     # already logged; nothing to fold
         return r.rewrite_marks, False           # fold into the injection line
 
@@ -235,8 +240,7 @@ class HostnameLogger:
                                  host=host, method=req.method, path=path)
         marks = r.rewrite_marks + ([r.terminal_mark] if r.terminated else [])
         if marks:
-            print(f"[http] {req.method} {host}{path} ({' '.join(marks)})",
-                  flush=True)
+            log.emit("http", method=req.method, host=host, path=path, marks=marks)
 
     def _synthesize(self, rule, pending: "rules.SyntheticResponse") -> http.Response:
         """Build the synthetic mitmproxy response for a terminal rule, applying
@@ -308,8 +312,8 @@ class HostnameLogger:
                     # the return value is ignored here.
                     t.scheme.on_response(ctx)
                 except Exception as e:
-                    print(f"[scheme] {t.scheme.name} response on {host} failed: "
-                          f"{e}", flush=True)
+                    log.emit("scheme", scheme=t.scheme.name, host=host,
+                             phase="response", error=str(e))
                     # FAIL CLOSED for the re-seal family: this binding's on_request
                     # fired, so this is a token-endpoint response that MUST be
                     # re-sealed. We couldn't, and the original body may still carry

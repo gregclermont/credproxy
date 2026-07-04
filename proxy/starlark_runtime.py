@@ -701,8 +701,9 @@ class ScriptedScheme:
                     raise ScriptResponseError(
                         f"{self.name}.{fn_name} failed ({reason}); "
                         f"response withheld") from None
-                print(f"[script] {self.name}.{fn_name} failed ({reason}); "
-                      f"failing closed", flush=True)
+                import log
+                log.emit("script", scheme=self.name, hook=fn_name, reason=reason,
+                         outcome="failing closed")
                 return False
             return bool(result)
         finally:

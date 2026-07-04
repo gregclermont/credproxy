@@ -28,6 +28,7 @@ from mitmproxy.tools.dump import DumpMaster
 import addon
 import admin
 import bootstrap
+import log
 from constants import HTTP_PORT, PROXY_PORT
 
 
@@ -42,7 +43,7 @@ def make_http_app(state: admin.AppState) -> web.Application:
 
 
 def _reload() -> None:
-    print("[main] SIGHUP -- re-execing", flush=True)
+    log.emit("main", msg="SIGHUP -- re-execing")
     os.execv(sys.executable, [sys.executable, "-u", *sys.argv])
 
 
@@ -50,18 +51,13 @@ async def run() -> None:
     asyncio.get_running_loop().add_signal_handler(signal.SIGHUP, _reload)
 
     state = admin.load_initial_state()
-    print(
-        f"[main] state: intercept_hosts={sorted(state.creds.intercept_hosts())}",
-        flush=True,
-    )
+    log.emit("main", msg="state",
+             intercept_hosts=sorted(state.creds.intercept_hosts()))
 
     http_runner = web.AppRunner(make_http_app(state), access_log=None)
     await http_runner.setup()
     await web.TCPSite(http_runner, "0.0.0.0", HTTP_PORT).start()
-    print(
-        f"[main] HTTP API listening on 0.0.0.0:{HTTP_PORT}",
-        flush=True,
-    )
+    log.emit("main", msg=f"HTTP API listening on 0.0.0.0:{HTTP_PORT}")
 
     opts = options.Options(
         listen_host="127.0.0.1",
@@ -70,10 +66,8 @@ async def run() -> None:
     )
     master = DumpMaster(opts, with_termlog=True, with_dumper=False)
     master.addons.add(addon.HostnameLogger(state))
-    print(
-        f"[main] mitmproxy listening on 127.0.0.1:{PROXY_PORT} (transparent)",
-        flush=True,
-    )
+    log.emit("main",
+             msg=f"mitmproxy listening on 127.0.0.1:{PROXY_PORT} (transparent)")
 
     try:
         await master.run()

@@ -503,109 +503,61 @@ def do_inspect(ctx: Ctx, name: str | None) -> None:
 
 def do_logs(ctx: Ctx, name: str | None, audit: bool = False) -> None:
     ws = _resolve_ws(ctx, name)
-    if audit:
-        _logs_audit(ws, ctx.json)
-        return
-    if ctx.json:
-        _logs_json(ws)
-        return
-    os.execvp("docker", ["docker", "logs", "-f", ws.proxy_container])
+    _logs_stream(ws, as_json=ctx.json, audit_only=audit)
 
 
-_AUDIT_TAG = "[audit] "
+# The proxy prefixes every structured record with this (see proxy/log.py).
+_LOG_PREFIX = "credproxy "
 
 
-def _logs_audit(ws: Workspace, as_json: bool) -> None:
-    """Stream only the proxy's structured `[audit]` events (#24).
-
-    The proxy emits `[audit] {json}` lines (see proxy/audit.py) interleaved with
-    ordinary debug output; docker's log driver is the durable store (survives
-    stop/start). We tail `docker logs -f`, keep only the audit lines, and either
-    pretty-print each event (default) or pass the raw event object through as
-    JSON-lines (`--json`)."""
+def _parse_credproxy_line(line: str) -> dict | None:
+    """Parse one `docker logs` line into a proxy structured record, or None if it
+    isn't one. Requires the `credproxy ` prefix at the START of the line (not
+    anywhere in it) plus a JSON object carrying a `kind`. Because the proxy
+    JSON-encodes every untrusted value (a rule/scheme error message that can echo
+    workspace input), such content is escaped inside the record and can NEVER
+    spill a forged `credproxy {...}` line of its own -- the substring-forgery the
+    old text stream allowed is structurally impossible."""
     import json
-    import subprocess
-
-    proc = subprocess.Popen(
-        ["docker", "logs", "-f", ws.proxy_container],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    interrupted = False
-    try:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            event = _audit_event_from_line(line)
-            if event is None:
-                continue
-            if as_json:
-                print(json.dumps(event), flush=True)
-            else:
-                print(_format_audit_event(event), flush=True)
-    except KeyboardInterrupt:
-        interrupted = True
-    finally:
-        proc.terminate()
-        rc = proc.wait()
-    if not interrupted and rc:
-        fail(f"docker logs exited with status {rc}")
-
-
-def _audit_event_from_line(line: str) -> dict | None:
-    """Parse one `docker logs` line into an audit event, or None if it isn't a
-    genuine one. Requires the `[audit] ` tag at the START of the line -- NOT
-    anywhere in it: audit.emit() prints the tag at column 0, but rule-error lines
-    are unsanitized, so a rule script `fail('[audit] {..}')` would otherwise let a
-    mid-line substring FORGE an event. Also requires a JSON object carrying an
-    `event` key, so a crafted `[audit] "not an object"` can't slip through."""
-    import json
-    if not line.startswith(_AUDIT_TAG):
+    if not line.startswith(_LOG_PREFIX):
         return None
     try:
-        event = json.loads(line[len(_AUDIT_TAG):].strip())
+        rec = json.loads(line[len(_LOG_PREFIX):])
     except json.JSONDecodeError:
         return None
-    if not isinstance(event, dict) or "event" not in event:
-        return None
-    return event
+    return rec if isinstance(rec, dict) and "kind" in rec else None
 
 
-def _format_audit_event(e: dict) -> str:
-    """One-line human rendering of an audit event. Tolerant of missing keys so a
-    future event kind still prints something useful."""
-    ts = e.get("ts", "")
-    kind = e.get("event", "?")
-    method = e.get("method", "")
-    host = e.get("host", "")
-    path = e.get("path", "")
-    where = f"{method} {host}{path}".strip()
-    subject = e.get("binding") or e.get("rule") or ""
-    outcome = e.get("outcome", "")
-    detail = " ".join(p for p in (subject and f"'{subject}'", outcome) if p)
-    return f"{ts}  {kind:<9} {where}  {detail}".rstrip()
-
-
-def _logs_json(ws: Workspace) -> None:
-    """JSON-lines log streaming: one `{"line": ...}` object per log line.
-    The proxy's lines aren't structured yet, so we just wrap them."""
+def _logs_stream(ws: Workspace, as_json: bool, audit_only: bool) -> None:
+    """Tail `docker logs -f` and reformat the proxy's structured `credproxy {json}`
+    records; mitmproxy's own termlog passes through verbatim (never mistaken for
+    a proxy record). Default: pretty one line per record. `--json`: the raw
+    records as JSON-lines (a non-proxy line wraps as `{"kind":"raw","line":...}`).
+    `--audit`: only `kind == "audit"` records. docker's log driver is the durable
+    store (survives stop/start)."""
     import json
     import subprocess
 
-    # Merge stderr into the stream so docker daemon errors (e.g. "No such
-    # container") surface as JSON lines instead of bare text, and so a startup
-    # failure is visible to a --json consumer.
     proc = subprocess.Popen(
         ["docker", "logs", "-f", ws.proxy_container],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     interrupted = False
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
-            print(json.dumps({"line": line.rstrip("\n")}), flush=True)
+            rec = _parse_credproxy_line(line)
+            if audit_only:
+                if rec is not None and rec.get("kind") == "audit":
+                    print(json.dumps(rec) if as_json else _format_record(rec),
+                          flush=True)
+            elif rec is not None:
+                print(json.dumps(rec) if as_json else _format_record(rec),
+                      flush=True)
+            elif as_json:      # non-proxy line (mitmproxy etc.)
+                print(json.dumps({"kind": "raw", "line": line.rstrip("\n")}),
+                      flush=True)
+            else:
+                print(line, end="", flush=True)   # pass mitmproxy output through
     except KeyboardInterrupt:
         interrupted = True
     finally:
@@ -615,6 +567,36 @@ def _logs_json(ws: Workspace) -> None:
     # container doesn't exist; propagate it rather than reporting success.
     if not interrupted and rc:
         fail(f"docker logs exited with status {rc}")
+
+
+def _format_record(rec: dict) -> str:
+    """One-line human rendering of a proxy structured record (log.py). Tolerant of
+    missing keys and unknown/future kinds."""
+    ts = rec.get("ts", "")
+    kind = rec.get("kind", "?")
+    where = f"{rec.get('method', '')} {rec.get('host', '')}" \
+            f"{rec.get('path', '')}".strip()
+    if kind == "audit":
+        subj = rec.get("binding") or rec.get("rule") or ""
+        detail = " ".join(p for p in (subj and f"'{subj}'", rec.get("outcome", ""))
+                          if p)
+        return f"{ts}  audit {rec.get('event', '?'):<9} {where}  {detail}".rstrip()
+    if kind in ("http", "api"):
+        marks = rec.get("marks")
+        return f"{ts}  {kind:<6} {where}" \
+               f"{' (' + ' '.join(marks) + ')' if marks else ''}".rstrip()
+    if kind == "sni":
+        err = f" -- {rec['error']}" if rec.get("error") else ""
+        return f"{ts}  sni    {rec.get('sni') or '<no-sni>'} " \
+               f"({rec.get('decision', '?')}){err}"
+    if kind == "rule-error":
+        return f"{ts}  rule   {rec.get('rule', '')} failed: {rec.get('error', '')}"
+    if kind in ("scheme", "script"):
+        detail = rec.get("error") or rec.get("reason", "")
+        return f"{ts}  {kind:<6} {rec.get('scheme', '')} " \
+               f"{rec.get('phase') or rec.get('hook', '')}: {detail}".rstrip(": ")
+    rest = " ".join(f"{k}={v}" for k, v in rec.items() if k not in ("ts", "kind"))
+    return f"{ts}  {kind:<6} {rest}".rstrip()
 
 
 # ---- binding commands --------------------------------------------------------

@@ -565,8 +565,9 @@ def test_reseal_audit_correlates_source_binding(capsys):
     af.request.headers["Authorization"] = "Bearer " + ph
     log.request(af)                       # API-host request: runtime swap fires
 
-    events = [json.loads(l[len("[audit] "):]) for l in
-              capsys.readouterr().out.splitlines() if l.startswith("[audit] ")]
+    events = [json.loads(l[len("credproxy "):]) for l in
+              capsys.readouterr().out.splitlines() if l.startswith("credproxy ")]
+    events = [e for e in events if e.get("kind") == "audit"]
     assert any(e["event"] == "reseal" and e["binding"] == "oauth" for e in events)
     assert any(e["event"] == "inject" and e["binding"] == "reseal:oauth"
                for e in events)          # correlatable, not a synthetic ph id

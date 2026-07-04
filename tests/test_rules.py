@@ -45,6 +45,18 @@ def _bearer_binding(host, placeholder, real):
             "placeholder": placeholder}
 
 
+def _records(out, kind=None):
+    """The proxy's structured `credproxy {json}` records from captured stdout,
+    optionally filtered by `kind` (see proxy/log.py)."""
+    recs = []
+    for line in out.splitlines():
+        if line.startswith("credproxy "):
+            r = json.loads(line[len("credproxy "):])
+            if kind is None or r.get("kind") == kind:
+                recs.append(r)
+    return recs
+
+
 # ---- pathmatch --------------------------------------------------------------
 
 @pytest.mark.parametrize("glob,path,ok", [
@@ -275,25 +287,21 @@ def test_request_terminal_http_line_folds_prior_rewrite_marks(capsys):
     ])
     log = addon.HostnameLogger(_state(creds))
     log.request(_flow())
-    http_lines = [l for l in capsys.readouterr().out.splitlines()
-                  if l.startswith("[http]")]
-    assert len(http_lines) == 1
-    line = http_lines[0]
-    assert "rewrite:rw" in line and "block:blk" in line
-    assert line.index("rewrite:rw") < line.index("block:blk")
+    http = _records(capsys.readouterr().out, "http")
+    assert len(http) == 1
+    assert http[0]["marks"] == ["rewrite:rw", "block:blk"]   # order preserved
 
 
 def test_response_script_error_prints_http_line(capsys):
-    # A response-script failure now logs an [http] line (rule-error:NAME) as well
-    # as the 502 -- the response phase used to print none.
+    # A response-script failure logs an http record (marks: rule-error:NAME) as
+    # well as the 502 -- the response phase used to print none.
     creds = _creds([_script_rule("boom", "def on_response():\n    fail('x')\n")])
     log = addon.HostnameLogger(_state(creds))
     flow = _flow(resp=True)
     log.response(flow)
     assert flow.response.status_code == 502
-    http_lines = [l for l in capsys.readouterr().out.splitlines()
-                  if l.startswith("[http]")]
-    assert any("rule-error:boom" in l for l in http_lines)
+    http = _records(capsys.readouterr().out, "http")
+    assert any("rule-error:boom" in r.get("marks", []) for r in http)
 
 
 # ---- scripted rules ---------------------------------------------------------
@@ -365,9 +373,8 @@ def test_hidden_rule_hit_is_audited(capsys):
                      "action": "block", "visible": False}])
     log = addon.HostnameLogger(_state(creds))
     log.request(_flow())
-    lines = [l for l in capsys.readouterr().out.splitlines() if l.startswith("[audit]")]
-    events = [json.loads(l[len("[audit] "):]) for l in lines]
-    rule_events = [e for e in events if e["event"] == "rule"]
+    rule_events = [e for e in _records(capsys.readouterr().out, "audit")
+                   if e["event"] == "rule"]
     assert len(rule_events) == 1
     assert rule_events[0]["rule"] == "trip"
     assert rule_events[0]["outcome"] == "block"
