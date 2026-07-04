@@ -257,9 +257,11 @@ def test_match_rules_first_terminal_wins():
     assert [x.name for x in m2] == ["rw", "never"]
 
 
-def test_match_rules_response_only_script_continues():
-    # A response-only script (scrub-emails) has no request-phase effect, so it must
-    # NOT stop the dry-run: a following block has to be reported.
+def test_match_rules_script_never_hides_later_rule():
+    # The CLI has no Starlark, so a script's phase is unknown: it is always
+    # reported as possibly-terminal (may_terminate) and NEVER stops the dry-run --
+    # a definite later block is still shown, flagged conditional on the script.
+    # (match_rules no longer reads the .star, so the script name need not resolve.)
     from credproxy_cli.core.rules import Rule, match_rules
     rules = [
         Rule(name="scrub", hosts=("api.github.com",), action="script",
@@ -267,28 +269,9 @@ def test_match_rules_response_only_script_continues():
         Rule(name="blk", hosts=("api.github.com",), action="block"),
     ]
     m = match_rules(rules, "GET", "api.github.com", "/users/x")
-    assert [x.name for x in m] == ["scrub", "blk"]
-    assert m[0].terminal is False          # response-only script: non-terminal
-    assert m[1].terminal is True
-
-
-def test_match_rules_request_active_script_is_conditional(xdg):
-    # A request-active script MIGHT block at runtime; a following block is still
-    # reported (conditional), not hidden -- the dry-run can't solve the halting
-    # problem, so it stays honest.
-    from credproxy_cli.core.paths import scripts_config_dir
-    from credproxy_cli.core.rules import Rule, match_rules
-    d = scripts_config_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "rw.star").write_text("def on_request():\n    req_set_header('X', 'y')\n")
-    rules = [
-        Rule(name="rw", hosts=("api.github.com",), action="script", script="rw"),
-        Rule(name="blk", hosts=("api.github.com",), action="block"),
-    ]
-    m = match_rules(rules, "GET", "api.github.com", "/x")
-    assert [x.name for x in m] == ["rw", "blk"]         # block NOT hidden
+    assert [x.name for x in m] == ["scrub", "blk"]      # block NOT hidden
     assert m[0].may_terminate is True and m[0].terminal is False
-    assert m[1].terminal is True and m[1].conditional is True   # gated on rw
+    assert m[1].terminal is True and m[1].conditional is True   # gated on scrub
 
 
 def test_match_rules_path_and_host_glob():

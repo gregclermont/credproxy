@@ -517,21 +517,25 @@ def _rule_compile_hint(err: Exception) -> str | None:
     return None
 
 
-# Detect which top-level hooks a script defines. starlark-pyo3 exposes NO symbol
-# introspection (the frozen module has only `call`; the AST/typecheck Interface
-# is opaque), so this is a lexical scan. The one false-positive vector for a
-# `(?m)^def` scan is a TRIPLE-quoted string whose content starts a line with
-# `def on_request():` (a single-line string or `#` comment can't put `def` at
-# column 0), so we blank triple-quoted strings first -- preserving newlines so
-# line-anchoring is unaffected. Getting this wrong 502s every matching request
-# (the runtime would call a nonexistent export).
-_TRIPLE_STRING_RE = re.compile(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'')
-
-
-def _defines_hook(source: str, hook: str) -> bool:
-    stripped = _TRIPLE_STRING_RE.sub(
-        lambda m: "\n" * m.group(0).count("\n"), source)
-    return re.search(rf"(?m)^def[ \t]+{hook}\b", stripped) is not None
+def _module_defines(source: str, name: str, primitives: dict, filename: str) -> bool:
+    """True iff `source` binds a TOP-LEVEL `name` (a hook function). Uses the real
+    Starlark resolver, NOT a lexer: compile a throwaway module of `source` plus a
+    top-level reference to `name`; the resolver raises `Variable `name` not found`
+    iff `name` isn't a real binding. Robust where a text scan is not -- a `def`
+    inside a docstring is not a binding, and a `\"\"\"` inside a single-quoted
+    literal is not a string delimiter (both fooled the old `(?m)^def` regex). The
+    reference only binds the function object; it does not call it. `source` must
+    already have compiled clean (the caller compiles it first), so the ONLY new
+    failure a probe can hit is the undefined reference to `name`."""
+    module = starlark.Module()
+    for prim_name, fn in primitives.items():
+        module.add_callable(prim_name, fn)
+    probe = f"{source}\n_credproxy_probe_{name} = {name}\n"
+    try:
+        starlark.eval(module, starlark.parse(filename, probe), _GLOBALS)
+        return True
+    except Exception:
+        return False
 
 
 class ScriptResponseError(Exception):
@@ -575,30 +579,21 @@ class ScriptedScheme:
         # Deadline for cooperative cancellation; enforced only when the call
         # path supports check_cancelled (see module docstring).
         self._timeout = timeout
-        self._has_on_response = _defines_hook(source, "on_response")
-        self._has_on_request = _defines_hook(source, "on_request")
 
-        if kind == "rule":
-            # Credential-bearing primitives are absent from RULE_PRIMITIVES, so
-            # the resolver (below) rejects any reference to one at construction --
-            # no source scan needed. We only require at least one hook to exist.
-            if not self._has_on_request and not self._has_on_response:
-                raise ValueError(
-                    "rule script defines neither on_request() nor on_response()")
-            primitives = RULE_PRIMITIVES
-        else:
-            primitives = PRIMITIVES
-
+        # kind picks the primitive set; credential-bearing primitives are simply
+        # absent from RULE_PRIMITIVES, so the resolver rejects a rule that
+        # references one (no source scan needed).
+        primitives = RULE_PRIMITIVES if kind == "rule" else PRIMITIVES
+        fname = filename or f"{name}.star"
         module = starlark.Module()
         for prim_name, fn in primitives.items():
             module.add_callable(prim_name, fn)
-        ast = starlark.parse(filename or f"{name}.star", source)
         # No file_loader -> load() is rejected; standard globals only. starlark's
         # name resolver rejects any reference to an unregistered name here, so a
-        # rule calling a credential primitive (secret/mint/crypto -- absent from
-        # RULE_PRIMITIVES) fails to compile; translate that into a targeted hint.
+        # rule calling a credential primitive (secret/mint/crypto) fails to
+        # compile; translate that into a targeted hint.
         try:
-            starlark.eval(module, ast, _GLOBALS)
+            starlark.eval(module, starlark.parse(fname, source), _GLOBALS)
         except Exception as e:
             if kind == "rule":
                 hint = _rule_compile_hint(e)
@@ -606,6 +601,15 @@ class ScriptedScheme:
                     raise ValueError(hint) from e
             raise
         self._frozen = module.freeze()
+
+        # Which hooks the script actually defines -- via the resolver (see
+        # _module_defines), not a lexer. `source` compiled clean above, so each
+        # probe's only new failure mode is an undefined reference to the hook.
+        self._has_on_request = _module_defines(source, "on_request", primitives, fname)
+        self._has_on_response = _module_defines(source, "on_response", primitives, fname)
+        if kind == "rule" and not self._has_on_request and not self._has_on_response:
+            raise ValueError(
+                "rule script defines neither on_request() nor on_response()")
 
     @property
     def mutates_response(self) -> bool:

@@ -385,11 +385,9 @@ class Renderer:
         for m in matches:
             detail = m["action"]
             if m.get("script"):
-                if m.get("may_terminate"):
-                    detail = f"script:{m['script']} (may block/respond/rewrite)"
-                else:
-                    detail = (f"script:{m['script']} "
-                              f"(response-phase; may rewrite the response)")
+                # The dry-run can't run Starlark, so a script's phase is unknown;
+                # report it as possibly-terminal (see core.rules.match_rules).
+                detail = f"script:{m['script']} (may block/respond/rewrite)"
             elif m["action"] in ("block", "respond") and m.get("status"):
                 detail = f"{m['action']} {m['status']}"
             vis = "" if m["visible"] else "  [hidden]"

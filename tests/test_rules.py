@@ -538,7 +538,8 @@ def test_builtin_scrub_emails_passthrough_non_object():
 def test_docstring_def_not_misclassified_as_request_hook():
     # A response-only script whose DOCSTRING contains a column-0 `def on_request():`
     # must NOT be treated as request-active -- else the runtime calls a nonexistent
-    # export and 502s every matching request. Hook detection blanks triple strings.
+    # export and 502s every matching request. The resolver-based detector sees no
+    # real on_request binding.
     src = ('def on_response():\n'
            '    """\n'
            'def on_request(): not a real def, inside a docstring\n'
@@ -551,27 +552,27 @@ def test_docstring_def_not_misclassified_as_request_hook():
     assert flow.response is None            # passed through, NOT a 502
 
 
-def test_defines_hook_parity_with_cli_mirror():
-    # The CLI mirrors _defines_hook so `rule test` agrees with the proxy on a
-    # script's phase. Cross-compare over the edge cases (docstring/comment/string
-    # `def` lines). Skips if cli/ isn't mounted (bare proxy-suite run).
-    import sys as _sys
-    if "/opt/cli" not in _sys.path:
-        _sys.path.insert(0, "/opt/cli")
-    try:
-        from credproxy_cli.core.rules import _defines_hook as cli_defines
-    except Exception:
-        pytest.skip("credproxy_cli not importable (cli/ not mounted)")
-    from starlark_runtime import _defines_hook as proxy_defines
-    fixtures = [
-        "def on_request():\n    pass\n",
-        "def on_response():\n    pass\n",
-        '"""\ndef on_request(): fake\n"""\ndef on_response():\n    pass\n',
-        "# def on_request(): comment\ndef on_response():\n    pass\n",
-        'x = "def on_request()"\ndef on_response():\n    pass\n',
-        "def on_response():\n    '''\ndef on_request(): fake\n    '''\n    return\n",
-        "def on_request():\n    pass\ndef on_response():\n    pass\n",
-    ]
-    for src in fixtures:
-        for hook in ("on_request", "on_response"):
-            assert cli_defines(src, hook) == proxy_defines(src, hook), (src, hook)
+def test_hook_detection_robust_via_resolver():
+    # Hook presence is decided by the Starlark resolver (a top-level reference that
+    # raises iff the name isn't a real binding), not a text scan -- so the cases
+    # that fooled the old `(?m)^def` regex are all correct.
+    from starlark_runtime import ScriptedScheme
+    # `"""` inside single-quoted literals around a real def: the OLD lexer blanked
+    # the def (false negative -> a rule with only on_request looked hook-less and
+    # was REJECTED at push; a re-seal injector fails OPEN). Resolver sees it.
+    s = ScriptedScheme("s", "FENCE = '\"\"\"'\ndef on_request():\n    block()\n"
+                            "END = '\"\"\"'\n", kind="rule")
+    assert s.has_on_request and not s.has_on_response
+    # a docstring `def on_request` is NOT a binding (old lexer false positive ->
+    # 502 every request by calling a nonexistent export).
+    s2 = ScriptedScheme("s", 'def on_response():\n    """\ndef on_request(): x\n'
+                             '    """\n    return\n', kind="rule")
+    assert s2.has_on_response and not s2.has_on_request
+    # a `#` comment containing `"""` doesn't hide a real hook.
+    s3 = ScriptedScheme("s", '# note """ template\ndef on_request():\n    block()\n',
+                        kind="rule")
+    assert s3.has_on_request
+    # a nested def is not a top-level hook.
+    s4 = ScriptedScheme("s", 'def on_response():\n    def on_request():\n'
+                             '        pass\n    return\n', kind="rule")
+    assert s4.has_on_response and not s4.has_on_request

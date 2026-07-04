@@ -191,13 +191,15 @@ matches what the proxy will do:
 $ credproxy workspace myproj rule test DELETE https://api.github.com/repos/a/b
 matched: gh-no-delete → block 403
 $ credproxy workspace myproj rule test GET https://api.github.com/users/x
-matched: scrub-emails → script:scrub-emails (response-phase; may rewrite the response)  [hidden]
+matched: scrub-emails → script:scrub-emails (may block/respond/rewrite)  [hidden]
 ```
 
-(The builtin `scrub-emails` is response-only and default-hidden, so it renders as
-a response-phase effect with the `[hidden]` marker. A request-active script that
-*might* block reads `(may block/respond/rewrite)`, and any rule listed after it is
-annotated as conditional on that script not terminating.)
+(`rule test` runs on the host, which has no Starlark runtime, so it can't tell
+whether a `script` rule acts in the request or response phase — it reports every
+script as possibly-terminal (`may block/respond/rewrite`) and never stops at one,
+so any rule listed after a script is annotated as conditional on that script not
+terminating. `scrub-emails` is default-hidden, hence the `[hidden]` marker. The
+proxy, which has the runtime, knows each script's real phase.)
 
 Rules ride the existing push path (`start` / `apply`), drift tracking (an
 `applied-rules.json` sibling of `applied-bindings.json`), and `inspect`. Because

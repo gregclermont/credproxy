@@ -451,53 +451,25 @@ class RuleMatch:
     conditional: bool = False    # only reached if a preceding script doesn't terminate
 
 
-# Mirror of proxy/starlark_runtime._defines_hook: does the script define a
-# top-level `def <hook>`? Blank triple-quoted strings first so a docstring line
-# like `def on_request():` doesn't misclassify a response-only script (the proxy
-# uses the identical scan, so `rule test` agrees with it on a script's phase).
-_TRIPLE_STRING_RE = re.compile(r'"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'')
-
-
-def _defines_hook(source: str, hook: str) -> bool:
-    stripped = _TRIPLE_STRING_RE.sub(
-        lambda m: "\n" * m.group(0).count("\n"), source)
-    return re.search(rf"(?m)^def[ \t]+{hook}\b", stripped) is not None
-
-
-def _script_is_request_active(rule: Rule) -> bool:
-    """Whether a script rule can run in the REQUEST phase (defines on_request).
-    A response-only script has no request-phase effect, so it does not stop the
-    request dry-run. Conservatively assume request-active if the source can't be
-    read (better to over-report a possible stop than to hide one)."""
-    from .scripts import find_script
-    try:
-        return _defines_hook(find_script(rule.script).source, "on_request")
-    except CredproxyError:
-        return True
-
-
 def match_rules(rules: list[Rule], method: str, host: str, path: str) -> list[RuleMatch]:
     """The rules that match a request, in declaration order. Only a `block`/
-    `respond` is DEFINITELY terminal -- evaluation stops there. A request-active
-    script (defines on_request) MIGHT block/respond at runtime, but the dry-run
-    can't know, so it does NOT stop: it's flagged `may_terminate`, and every
-    later match is flagged `conditional` (reached only if that script doesn't
-    terminate) -- so a definite later `block` is still reported. A response-only
-    script has no request-phase effect at all (neither terminal nor conditional-
-    inducing)."""
+    `respond` is DEFINITELY terminal -- evaluation stops there. A `script` MIGHT
+    block/respond at runtime, and the CLI has no Starlark, so it CANNOT tell a
+    request-active script from a response-only one -- it reports every script as
+    `may_terminate` and never stops at one. Every match after a script is flagged
+    `conditional` (reached only if that script doesn't terminate), so a definite
+    later `block` is still shown, never hidden. (The proxy, which has the runtime,
+    knows each script's actual phase; the dry-run is honestly conservative.)"""
     out: list[RuleMatch] = []
     conditional = False
     for r in rules:
         if not _matches(r, method, host, path):
             continue
         if r.action == "script":
-            request_active = _script_is_request_active(r)
             out.append(RuleMatch(r.name, r.action, terminal=False,
                                  visible=r.effective_visible,
-                                 may_terminate=request_active,
-                                 conditional=conditional))
-            if request_active:
-                conditional = True   # later rules only fire if this one doesn't
+                                 may_terminate=True, conditional=conditional))
+            conditional = True       # later rules only fire if this one doesn't
             continue
         terminal = r.action in _TERMINAL_ACTIONS
         out.append(RuleMatch(r.name, r.action, terminal=terminal,
