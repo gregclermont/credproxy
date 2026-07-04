@@ -141,3 +141,26 @@ def test_rule_constants_parity():
     # references it), so only the CLI mirror needs a parity assertion.
     assert cli_rules._FORBIDDEN_REWRITE_HEADERS \
         == proxy_rules._FORBIDDEN_REWRITE_HEADERS
+
+
+def test_rule_sequencing_parity_declarative():
+    """The CLI's offline match_rules and the proxy's RuleSet.dry_run must classify
+    a DECLARATIVE rule set identically -- same order, terminal, conditional -- so
+    the two hand-written first-terminal-wins walks can't drift. (Script rules
+    diverge by design: offline is conservative, dry_run reads the exact phase.)"""
+    from credproxy_cli.core.rules import Rule, match_rules, rule_wire_entries
+    proxy_config = _proxy_config()
+    rules = [
+        Rule(name="rw", hosts=("api.github.com",), action="rewrite",
+             set_headers={"X-Env": "s"}),
+        Rule(name="blk", hosts=("api.github.com",), action="block",
+             methods=("DELETE",)),
+        Rule(name="never", hosts=("api.github.com",), action="block"),
+    ]
+    cli = [(m.name, m.terminal, m.conditional)
+           for m in match_rules(rules, "DELETE", "api.github.com", "/repos/a")]
+    creds = proxy_config.load_resolved(
+        {"bindings": [], "rules": rule_wire_entries(rules)})
+    proxy = [(m["name"], m["terminal"], m["conditional"])
+             for m in creds.rule_set().dry_run("DELETE", "api.github.com", "/repos/a")]
+    assert cli == proxy == [("rw", False, False), ("blk", True, False)]

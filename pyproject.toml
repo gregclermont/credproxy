@@ -4,8 +4,9 @@
 #   uv sync                 # create .venv with the CLI (editable) + pytest
 #   uv run pytest           # host CLI tests (tests/cli)
 #   uv run credproxy ...    # the CLI, via the installed console script
-# The proxy is a separate deploy unit; its deps live in proxy/requirements.txt
-# and its tests run in-image (`credproxy dev test --proxy`).
+# The proxy is a separate deploy unit; its deps live in proxy/requirements.txt.
+# `credproxy dev test` runs its suite ON-HOST when those deps import there, else
+# in the image (`--container` forces the image).
 [project]
 name = "credproxy"
 version = "0.1.0"
@@ -30,6 +31,7 @@ module-name = "credproxy_cli"
 dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
-# `uv run pytest` (no args) runs the host CLI suite. The proxy suite (tests/)
-# runs in-image via `credproxy dev test --proxy` and has its own tests/pytest.ini.
+# `uv run pytest` (no args) runs the host CLI suite. The proxy suite (tests/) has
+# its own tests/pytest.ini; `credproxy dev test` runs it on-host when the proxy
+# deps import there, otherwise in the image (`--container` forces the image).
 testpaths = ["tests/cli"]

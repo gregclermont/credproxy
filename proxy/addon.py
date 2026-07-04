@@ -265,6 +265,12 @@ class HostnameLogger:
                 raise ValueError("synthetic headers must be string -> string")
             headers[k] = v
         body = pending.body
+        # Attribution is OURS to set: strip any X-Credproxy-Rule the author's
+        # respond(...) headers supplied (case-insensitive) BEFORE the visible/
+        # hidden split, so a hidden rule can't self-identify and a visible rule
+        # can't emit two contradictory attribution lines (author's + ours).
+        for k in [k for k in headers if k.lower() == "x-credproxy-rule"]:
+            del headers[k]
         if pending.kind == "block":
             if rule.visible:
                 headers.setdefault("Content-Type", "application/json")
@@ -275,12 +281,6 @@ class HostnameLogger:
         else:  # respond -- author-supplied body kept verbatim
             if rule.visible:
                 headers["X-Credproxy-Rule"] = rule.name
-            else:
-                # A HIDDEN rule must never self-identify: strip any X-Credproxy-Rule
-                # the author's `respond(...)` headers tried to set (case-insensitive,
-                # so it can't forge attribution to another rule's name either).
-                for k in [k for k in headers if k.lower() == "x-credproxy-rule"]:
-                    del headers[k]
         return http.Response.make(
             pending.status,
             body.encode("utf-8") if isinstance(body, str) else body,
@@ -308,7 +308,8 @@ class HostnameLogger:
                 # the minted placeholder is used on an API host) then correlates
                 # with this binding's `reseal` mint event below.
                 minter = RuntimeMinter(creds, placeholders.generate,
-                                       source_binding=t.name, source_host=host)
+                                       source_binding=t.name, source_host=host,
+                                       source_scheme=t.scheme.name)
                 # ResponseCtx wraps the whole flow: a re-seal scheme can read the
                 # request it answered (host/path) AND read/mutate the response.
                 ctx = ResponseCtx(flow, t.secrets, t.params, t.placeholder,

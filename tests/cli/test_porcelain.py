@@ -1297,3 +1297,22 @@ def test_format_record_handles_every_kind():
         {"ts": "t", "kind": "rule-error", "rule": "x", "error": "boom"})
     assert _format_record({"kind": "http"})              # missing keys: no crash
     assert "weird" in _format_record({"ts": "t", "kind": "weird", "foo": "bar"})
+
+
+def test_rule_test_json_envelope_offline_and_live(capsys):
+    """Offline and --live `rule test --json` share one envelope (method/url/live/
+    matches), so a consumer parses one shape; --live just adds intercepted/phase."""
+    import json
+    from credproxy_cli.porcelain.render import JsonRenderer
+    r = JsonRenderer()
+    r.rule_test("GET", "https://h/x", [{"name": "a", "action": "block"}])
+    off = json.loads(capsys.readouterr().out)
+    assert off == {"method": "GET", "url": "https://h/x", "live": False,
+                   "matches": [{"name": "a", "action": "block"}]}
+    r.rule_test_live("GET", "https://h/x",
+                     {"intercepted": True, "host": "h", "path": "/x",
+                      "matches": [{"name": "a", "phase": "response"}]})
+    live = json.loads(capsys.readouterr().out)
+    assert live["live"] is True and live["intercepted"] is True
+    assert live["method"] == "GET" and live["url"] == "https://h/x"
+    assert live["matches"][0]["phase"] == "response"

@@ -518,19 +518,26 @@ def _rule_compile_hint(err: Exception) -> str | None:
 
 
 def _module_defines(source: str, name: str, primitives: dict, filename: str) -> bool:
-    """True iff `source` binds a TOP-LEVEL `name` (a hook function). Uses the real
+    """True iff `source` binds a TOP-LEVEL callable `name` (a hook). Uses the real
     Starlark resolver, NOT a lexer: compile a throwaway module of `source` plus a
-    top-level reference to `name`; the resolver raises `Variable `name` not found`
-    iff `name` isn't a real binding. Robust where a text scan is not -- a `def`
-    inside a docstring is not a binding, and a `\"\"\"` inside a single-quoted
-    literal is not a string delimiter (both fooled the old `(?m)^def` regex). The
-    reference only binds the function object; it does not call it. `source` must
-    already have compiled clean (the caller compiles it first), so the ONLY new
-    failure a probe can hit is the undefined reference to `name`."""
+    probe that references `name` and asserts it is a function. Three ways to be
+    False, all as an eval error the caller catches:
+      - `name` is undefined -> the resolver raises `Variable `name` not found`;
+      - `name` is a non-callable binding (e.g. `on_request = True`) -> the
+        `type(...) == "function"` guard's `else fail(...)` fires (else the runtime
+        would later `call()` a non-callable and 502 every matching request);
+      - (a `def` inside a docstring / a `\"\"\"` in a single-quoted literal are
+        simply not bindings -- the cases that fooled the old `(?m)^def` regex).
+    A conditional EXPRESSION, not an `if` statement (Starlark forbids top-level
+    `if`). `type(fn)` is `"function"` for both `def`s and lambdas, so a real
+    `on_request = <fn>` alias correctly counts. The probe only binds/inspects the
+    object; it never calls it. `source` compiled clean first, so the ONLY new
+    failure is the probe itself."""
     module = starlark.Module()
     for prim_name, fn in primitives.items():
         module.add_callable(prim_name, fn)
-    probe = f"{source}\n_credproxy_probe_{name} = {name}\n"
+    probe = (f"{source}\n_credproxy_probe = ({name} if type({name}) == "
+             f'"function" else fail("{name} is not a function"))\n')
     try:
         starlark.eval(module, starlark.parse(filename, probe), _GLOBALS)
         return True

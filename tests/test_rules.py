@@ -583,6 +583,14 @@ def test_hook_detection_robust_via_resolver():
     s4 = ScriptedScheme("s", 'def on_response():\n    def on_request():\n'
                              '        pass\n    return\n', kind="rule")
     assert s4.has_on_response and not s4.has_on_request
+    # a NON-CALLABLE binding named like a hook is NOT a hook -- else the runtime
+    # would call() a non-callable and 502 every matching request.
+    s5 = ScriptedScheme("s", "on_request = True\ndef on_response():\n    return\n",
+                        kind="rule")
+    assert s5.has_on_response and not s5.has_on_request
+    # a lambda alias IS a real callable hook.
+    s6 = ScriptedScheme("s", "on_request = lambda: block()\n", kind="rule")
+    assert s6.has_on_request
 
 
 # ---- RuleSet.dry_run (rule test --live, exact per-script phase) --------------
@@ -647,3 +655,15 @@ def test_rule_error_audit_carries_visible(capsys):
     err = [e for e in _records(capsys.readouterr().out, "audit")
            if e["event"] == "rule" and e["outcome"] == "error"]
     assert err and err[0]["visible"] is False
+
+
+def test_visible_respond_single_attribution():
+    # A VISIBLE respond whose script sets its own X-Credproxy-Rule must emit only
+    # ONE canonical attribution (ours), not two contradictory header lines.
+    src = ('def on_request():\n'
+           '    respond(200, "x", {"x-credproxy-rule": "some-other-rule"})\n')
+    creds = _creds([_script_rule("vis", src, visible=True)])
+    log = addon.HostnameLogger(_state(creds))
+    flow = _flow()
+    log.request(flow)
+    assert flow.response.headers.get_all("X-Credproxy-Rule") == ["vis"]

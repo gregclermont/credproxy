@@ -184,8 +184,12 @@ rule add script  --host api.github.com --path '/users/**' --script scrub-emails
 ```
 
 `rule test` is the dry-run evaluator — the primary "why was/wasn't this blocked?"
-tool. It shares the matcher with the proxy (wire-parity tested), so its answer
-matches what the proxy will do:
+tool. It shares the host/method/path matcher with the proxy (wire-parity tested),
+so for **declarative** rules (block/respond/rewrite) its answer is exactly what the
+proxy will do. For **script** rules it's conservative: the host has no Starlark
+runtime, so it can't tell a request-active script from a response-only one and
+hedges every script as possibly-terminal (never hiding a later rule) — use
+`--live` (below) for the authoritative per-script answer.
 
 ```
 $ credproxy workspace myproj rule test DELETE https://api.github.com/repos/a/b

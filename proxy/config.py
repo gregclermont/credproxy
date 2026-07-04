@@ -238,16 +238,19 @@ class RuntimeMinter:
 
     def __init__(self, creds: "BindingCredentials", generate_placeholder,
                  source_binding: str | None = None,
-                 source_host: str | None = None):
+                 source_host: str | None = None,
+                 source_scheme: str | None = None):
         self._creds = creds
         self._generate = generate_placeholder
-        # The re-seal binding (and token-endpoint host) this mint is on behalf of.
-        # Named into the runtime transform so the LATER injection audit event (when
-        # the minted placeholder is used on an API host) carries `reseal:<source>`
-        # and correlates with the `reseal` mint event emitted here. Without it the
-        # injection would audit an uncorrelatable synthetic placeholder id.
+        # The re-seal binding (and token-endpoint host + scheme) this mint is on
+        # behalf of. `source_binding` is named into the runtime transform so the
+        # LATER injection audit event (when the minted placeholder is used on an
+        # API host) carries `reseal:<source>` and correlates with the `reseal`
+        # mint event emitted here; `source_scheme`/`source_host` round out that
+        # event's fields (parity with the pre-move addon-side emit).
         self._source_binding = source_binding
         self._source_host = source_host
+        self._source_scheme = source_scheme
 
     def mint(self, value: str, ttl: float | None, api_hosts, header: str = "Authorization") -> str:
         if not api_hosts:
@@ -273,7 +276,8 @@ class RuntimeMinter:
         # SCRIPT that mints but doesn't `return True` would otherwise register the
         # swap silently, leaving later `inject` events uncorrelated. This tracks
         # the actual registration.
-        audit.emit("reseal", binding=self._source_binding, host=self._source_host,
+        audit.emit("reseal", binding=self._source_binding,
+                   scheme=self._source_scheme, host=self._source_host,
                    api_hosts=list(api_hosts), outcome="minted")
         return placeholder
 

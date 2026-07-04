@@ -591,10 +591,15 @@ class JsonRenderer(Renderer):
         self._emit({"workspace": ws, "rules": rows})
 
     def rule_test(self, method: str, url: str, matches: list[dict]) -> None:
-        self._emit({"method": method, "url": url, "matches": matches})
+        self._emit({"method": method, "url": url, "live": False,
+                    "matches": matches})
 
     def rule_test_live(self, method: str, url: str, result: dict) -> None:
-        self._emit(result)
+        # Same envelope as offline (`method`/`url`/`live`/`matches`) so a consumer
+        # parses one shape; `--live` just adds `intercepted` and per-script `phase`.
+        self._emit({"method": method, "url": url, "live": True,
+                    "intercepted": result.get("intercepted"),
+                    "matches": result.get("matches", [])})
 
     def def_list(self, kind: str, rows: list[dict]) -> None:
         self._emit(rows)

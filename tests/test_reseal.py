@@ -568,6 +568,7 @@ def test_reseal_audit_correlates_source_binding(capsys):
     events = [json.loads(l[len("credproxy "):]) for l in
               capsys.readouterr().out.splitlines() if l.startswith("credproxy ")]
     events = [e for e in events if e.get("kind") == "audit"]
-    assert any(e["event"] == "reseal" and e["binding"] == "oauth" for e in events)
+    assert any(e["event"] == "reseal" and e["binding"] == "oauth"
+               and e["scheme"] == "oauth2-reseal" for e in events)
     assert any(e["event"] == "inject" and e["binding"] == "reseal:oauth"
                for e in events)          # correlatable, not a synthetic ph id
