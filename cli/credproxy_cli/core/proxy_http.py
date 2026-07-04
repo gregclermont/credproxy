@@ -67,6 +67,24 @@ def proxy_status(ws: Workspace, http_port: int) -> dict | None:
     return None
 
 
+def rule_test_live(ws: Workspace, http_port: int, method: str, url: str) -> dict:
+    """POST /admin/rule-test: the running proxy's authoritative rule dry-run for
+    (method, url) against its LOADED config -- exact per-script phase + the
+    intercept decision. Raises ProxyError on 401/non-200/connect failure."""
+    status, payload = _http_post_json(
+        f"http://127.0.0.1:{http_port}/admin/rule-test",
+        json.dumps({"method": method, "url": url}).encode(),
+        read_token(ws),
+    )
+    if status == 200:
+        return payload
+    if status == 401:
+        raise ProxyError(
+            f"proxy rejected the token (HTTP 401); check {ws.token_path}")
+    raise ProxyError(
+        f"proxy rule-test failed (HTTP {status}): {payload.get('error', payload)}")
+
+
 def wait_for_ready(http_port: int, timeout: float = 15.0) -> None:
     """Poll /health until the proxy answers 200 or `timeout` elapses."""
     deadline = time.monotonic() + timeout

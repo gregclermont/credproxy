@@ -201,6 +201,14 @@ so any rule listed after a script is annotated as conditional on that script not
 terminating. `scrub-emails` is default-hidden, hence the `[hidden]` marker. The
 proxy, which has the runtime, knows each script's real phase.)
 
+**`rule test --live`** answers the same question **authoritatively**: it asks the
+**running** proxy (`POST /admin/rule-test`, bearer-gated) to evaluate against its
+**loaded** config using its own matcher and compiled scripts. That gives the exact
+per-script phase (a response-only scrubber reads `response-phase; may rewrite the
+response`) and the intercept decision, and it verifies what's *actually running*
+— which may lag the edited TOML until `apply`/`start`. The default (offline) form
+needs no running proxy and reflects the config file; `--live` needs the proxy up.
+
 Rules ride the existing push path (`start` / `apply`), drift tracking (an
 `applied-rules.json` sibling of `applied-bindings.json`), and `inspect`. Because
 `/admin/config` is replace-all, **a rule edit re-pushes the whole config on the

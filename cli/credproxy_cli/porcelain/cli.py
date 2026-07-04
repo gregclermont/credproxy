@@ -1030,6 +1030,11 @@ def do_rule_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
 
     ws = _resolve_ws(ctx, name)
     _require_exists(ws)
+
+    if getattr(a, "rule_live", False):
+        _do_rule_test_live(ctx, ws, a)
+        return
+
     parts = urlsplit(a.url)
     host = parts.hostname
     if not host:
@@ -1049,6 +1054,22 @@ def do_rule_test(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
                      "terminal": m.terminal, "may_terminate": m.may_terminate,
                      "conditional": m.conditional})
     render.OUT.rule_test(a.method.upper(), a.url, rows)
+
+
+def _do_rule_test_live(ctx: Ctx, ws: Workspace, a: argparse.Namespace) -> None:
+    """`rule test --live`: ask the RUNNING proxy for the authoritative answer
+    (exact per-script phase + intercept decision) against its LOADED config --
+    which may lag the edited TOML until `apply`/`start`."""
+    from ..core import proxy_http
+    from ..core.imageenv import ImageEnv
+
+    if core_docker.container_status(ws.proxy_container) != "running":
+        fail(f"workspace '{ws.name}' proxy is not running; `start` it, or omit "
+             f"--live for the offline (config-file) dry-run")
+    meta = ImageEnv.load()
+    host_port = core_docker.resolve_host_port(ws.proxy_container, meta.http_port)
+    result = proxy_http.rule_test_live(ws, host_port, a.method, a.url)
+    render.OUT.rule_test_live(a.method.upper(), a.url, result)
 
 
 # ---- mount commands ----------------------------------------------------------
@@ -1149,15 +1170,19 @@ def do_dev_build(ctx: Ctx) -> None:
     core_docker.docker(["build", "-t", IMAGE_TAG, str(PROXY_DIR)], stream=True)
 
 
-def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False, proxy_only: bool = False) -> None:
+def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False,
+                proxy_only: bool = False, force_container: bool = False) -> None:
     """Run the test suite(s).
 
-    Default: run BOTH the host-side CLI tests (tests/cli/, via the host's
-    python3 -m pytest) and the proxy suite inside the image (tests/, via
-    docker run). Trailing args after `--` pass through to the proxy pytest.
+    Default: run BOTH the host-side CLI tests (tests/cli/) and the proxy suite
+    (tests/). The proxy suite runs ON-HOST when its runtime deps (mitmproxy,
+    aiohttp, starlark) import there -- near-instant -- else inside the image via
+    `docker run`. Trailing args after `--` pass through to the proxy pytest.
 
-    --cli:   host CLI tests only (no docker required).
-    --proxy: proxy in-container tests only.
+    --cli:       host CLI tests only (no docker required).
+    --proxy:     proxy suite only.
+    --container: force the proxy suite into the image even if the deps are
+                 importable on the host (the canonical, version-pinned env).
     """
     import importlib.util
     import subprocess
@@ -1187,9 +1212,26 @@ def do_dev_test(ctx: Ctx, trailing: list[str], cli_only: bool = False, proxy_onl
             if not run_proxy:
                 sys.exit(result.returncode)
 
-    # Proxy suite, in-container. tests/cli/ is host-only: it is excluded here
-    # both because it needs no docker and because its module names (e.g.
-    # test_config) collide with the proxy suite's under pytest's rootdir.
+    # Proxy suite. tests/cli/ is excluded (host-only; its module names collide
+    # with the proxy suite's under one rootdir). Prefer running it ON-HOST when
+    # the proxy's runtime deps import there -- it skips the ~container-startup
+    # tax that dominates the inner loop -- falling back to the image otherwise.
+    proxy_deps = ("mitmproxy", "aiohttp", "starlark")
+    missing = [m for m in proxy_deps if importlib.util.find_spec(m) is None]
+    if not force_container and not missing:
+        say("running proxy suite on-host (deps present; --container forces the image)...")
+        env = {**os.environ, "PYTHONPATH": str(PROXY_DIR)}
+        host_cmd = [sys.executable, "-m", "pytest", "-v", str(TESTS_DIR),
+                    "--ignore", str(TESTS_DIR / "cli")] + trailing
+        if cli_failed:
+            r = subprocess.run(host_cmd, check=False, env=env)
+            sys.exit(1 if r.returncode == 0 else r.returncode)
+        os.execvpe(sys.executable, host_cmd, env)  # replace proc; preserves TTY
+
+    if not force_container:
+        say(f"proxy deps not importable on host ({', '.join(missing)}); running the "
+            f"proxy suite in the image. Install them (see proxy/requirements.txt) "
+            f"for the faster on-host path.")
     meta = ImageEnv.load()
     cmd = [
         "docker", "run", "--rm",
@@ -1315,6 +1357,10 @@ def _rule_subparsers(parent: argparse._SubParsersAction) -> None:
     p = parent.add_parser("test")
     p.add_argument("method", metavar="METHOD")
     p.add_argument("url", metavar="URL")
+    p.add_argument("--live", action="store_true", dest="rule_live",
+                   help="ask the RUNNING proxy for the authoritative answer "
+                        "(exact script phase) against its loaded config, instead "
+                        "of the offline config-file dry-run")
 
 
 def _mount_subparsers(parent: argparse._SubParsersAction) -> None:
@@ -2229,17 +2275,20 @@ def _dispatch_dev(ctx: Ctx, rest: list[str], trailing: list[str]) -> None:
         do_dev_build(ctx)
     elif sub == "test":
         test_args = rest[1:]  # selection flags (pytest args go after `--`)
-        unknown = [a for a in test_args if a not in ("--cli", "--proxy")]
+        _known = ("--cli", "--proxy", "--container", "--docker")
+        unknown = [a for a in test_args if a not in _known]
         if unknown:
             fail(f"dev test: unknown flag(s) {' '.join(unknown)} "
-                 f"(use --cli or --proxy; pytest args go after `--`)")
+                 f"(use --cli/--proxy/--container; pytest args go after `--`)")
         cli_only = "--cli" in test_args
         proxy_only = "--proxy" in test_args
+        force_container = "--container" in test_args or "--docker" in test_args
         if cli_only and proxy_only:
             # Both = "neither" under the old logic, yet the proxy path still ran.
             fail("dev test: --cli and --proxy are mutually exclusive "
                  "(omit both to run both suites)")
-        do_dev_test(ctx, trailing, cli_only=cli_only, proxy_only=proxy_only)
+        do_dev_test(ctx, trailing, cli_only=cli_only, proxy_only=proxy_only,
+                    force_container=force_container)
     elif sub == "reload":
         do_dev_reload(ctx, rest[1] if len(rest) > 1 else None)
     else:

@@ -177,6 +177,38 @@ async def admin_config_get(request: web.Request) -> web.Response:
     return web.json_response({"loaded": loaded, "fingerprint": fingerprint})
 
 
+async def admin_rule_test(request: web.Request) -> web.Response:
+    """POST /admin/rule-test -- bearer-gated authoritative dry-run for the CLI's
+    `rule test --live`. Body `{method, url}`. Runs the proxy's OWN rule matcher
+    against the LOADED config and returns the ordered matches with exact per-script
+    phase (from the compiled schemes) plus the intercept decision -- the ground
+    truth the host-side matcher can only approximate. Read-only (no state change)."""
+    from urllib.parse import urlsplit
+
+    state = request.app[STATE_KEY]
+    err = _auth_error(request)
+    if err is not None:
+        return err
+    try:
+        body = await request.json()
+    except json.JSONDecodeError:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+    method, url = body.get("method"), body.get("url")
+    if not isinstance(method, str) or not method or not isinstance(url, str) or not url:
+        return web.json_response(
+            {"error": "expected {method: str, url: str}"}, status=400)
+    # Tolerate a bare host/path (no scheme) as well as a full URL.
+    parts = urlsplit(url if "://" in url else "//" + url)
+    host = (parts.hostname or "").lower()
+    path = parts.path or "/"
+    creds = state.creds
+    return web.json_response({
+        "method": method.upper(), "host": host, "path": path,
+        "intercepted": creds.intercepts(host),
+        "matches": creds.rule_set().dry_run(method, host, path),
+    })
+
+
 def _atomic_write(path: Path, data: bytes, mode: int) -> None:
     tmp = str(path) + ".tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
@@ -188,4 +220,5 @@ def _atomic_write(path: Path, data: bytes, mode: int) -> None:
 admin_routes = [
     web.post("/admin/config", admin_config),
     web.get("/admin/config", admin_config_get),
+    web.post("/admin/rule-test", admin_rule_test),
 ]

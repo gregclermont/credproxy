@@ -576,3 +576,30 @@ def test_hook_detection_robust_via_resolver():
     s4 = ScriptedScheme("s", 'def on_response():\n    def on_request():\n'
                              '        pass\n    return\n', kind="rule")
     assert s4.has_on_response and not s4.has_on_request
+
+
+# ---- RuleSet.dry_run (rule test --live, exact per-script phase) --------------
+
+def test_dry_run_exact_script_phase():
+    # A response-only script (scrub-emails): dry_run knows the exact phase, so it
+    # reports phase="response", non-terminal, and does NOT gate the later block
+    # (conditional stays False) -- unlike the CLI's conservative offline matcher.
+    creds = _creds([
+        _script_rule("scrub", _SCRUB_EMAILS, path="/users/**"),
+        {"name": "blk", "hosts": ["api.github.com"], "action": "block"},
+    ])
+    m = creds.rule_set().dry_run("GET", "api.github.com", "/users/x")
+    assert [x["name"] for x in m] == ["scrub", "blk"]
+    assert m[0]["phase"] == "response" and m[0]["may_terminate"] is False
+    assert m[0]["conditional"] is False
+    assert m[1]["terminal"] is True and m[1]["conditional"] is False
+
+
+def test_dry_run_request_active_script_gates_later_rule():
+    creds = _creds([
+        _script_rule("rw", "def on_request():\n    req_set_header('X', 'y')\n"),
+        {"name": "blk", "hosts": ["api.github.com"], "action": "block"},
+    ])
+    m = creds.rule_set().dry_run("GET", "api.github.com", "/x")
+    assert m[0]["phase"] == "request" and m[0]["may_terminate"] is True
+    assert m[1]["terminal"] is True and m[1]["conditional"] is True   # gated on rw

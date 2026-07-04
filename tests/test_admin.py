@@ -492,3 +492,37 @@ async def test_get_config_reports_fingerprint(aiohttp_client, app):
         "/admin/config", headers={"Authorization": "Bearer established"})
     assert resp.status == 200
     assert await resp.json() == {"loaded": True, "fingerprint": "abc123"}
+
+
+# ---- /admin/rule-test (live dry-run) ----
+
+
+async def test_rule_test_endpoint(aiohttp_client, app, state):
+    import config
+    state.creds = config.load_resolved({"bindings": [], "rules": [
+        {"name": "blk", "hosts": ["api.github.com"], "action": "block",
+         "methods": ["DELETE"], "path": "/repos/**"},
+    ]})
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/admin/rule-test",
+        json={"method": "DELETE", "url": "https://api.github.com/repos/a/b"},
+        headers={"Authorization": "Bearer established"})
+    assert resp.status == 200
+    data = await resp.json()
+    assert data["intercepted"] is True
+    assert [m["name"] for m in data["matches"]] == ["blk"]
+    assert data["matches"][0]["terminal"] is True
+    # a non-matching method: intercepted (union) but no rule fires
+    resp2 = await client.post(
+        "/admin/rule-test",
+        json={"method": "GET", "url": "https://api.github.com/repos/a/b"},
+        headers={"Authorization": "Bearer established"})
+    assert (await resp2.json())["matches"] == []
+
+
+async def test_rule_test_endpoint_requires_token(aiohttp_client, app):
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/admin/rule-test", json={"method": "GET", "url": "https://x.example.com/"})
+    assert resp.status == 401

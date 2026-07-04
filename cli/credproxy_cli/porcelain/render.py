@@ -378,22 +378,43 @@ class Renderer:
         for row in table:
             print("  ".join(f"{row[i]:<{widths[i]}}" for i in range(len(header))).rstrip())
 
+    @staticmethod
+    def _rule_match_line(m: dict) -> str:
+        detail = m["action"]
+        if m.get("script"):
+            # Offline the phase is unknown (no host Starlark) -> possibly-terminal.
+            # --live carries the exact `phase` from the proxy's compiled scheme.
+            if m.get("phase") == "response":
+                detail = (f"script:{m['script']} "
+                          f"(response-phase; may rewrite the response)")
+            else:
+                detail = f"script:{m['script']} (may block/respond/rewrite)"
+        elif m["action"] in ("block", "respond") and m.get("status"):
+            detail = f"{m['action']} {m['status']}"
+        vis = "" if m["visible"] else "  [hidden]"
+        cond = ("  (only if a preceding script doesn't block/respond)"
+                if m.get("conditional") else "")
+        return f"matched: {m['name']} → {detail}{vis}{cond}"
+
     def rule_test(self, method: str, url: str, matches: list[dict]) -> None:
         if not matches:
             print(f"no rule matches {method} {url}")
             return
         for m in matches:
-            detail = m["action"]
-            if m.get("script"):
-                # The dry-run can't run Starlark, so a script's phase is unknown;
-                # report it as possibly-terminal (see core.rules.match_rules).
-                detail = f"script:{m['script']} (may block/respond/rewrite)"
-            elif m["action"] in ("block", "respond") and m.get("status"):
-                detail = f"{m['action']} {m['status']}"
-            vis = "" if m["visible"] else "  [hidden]"
-            cond = ("  (only if a preceding script doesn't block/respond)"
-                    if m.get("conditional") else "")
-            print(f"matched: {m['name']} → {detail}{vis}{cond}")
+            print(self._rule_match_line(m))
+
+    def rule_test_live(self, method: str, url: str, result: dict) -> None:
+        matches = result.get("matches", [])
+        passthrough = "" if result.get("intercepted") else \
+            "  (host not intercepted -- passthrough)"
+        say("(live: what the running proxy would do, against its loaded config)")
+        if not matches:
+            print(f"no rule matches {method} {url}{passthrough}")
+            return
+        if passthrough:
+            print(f"note:{passthrough.strip()}")
+        for m in matches:
+            print(self._rule_match_line(m))
 
     # -- injector / provider list --
     def def_list(self, kind: str, rows: list[dict]) -> None:
@@ -571,6 +592,9 @@ class JsonRenderer(Renderer):
 
     def rule_test(self, method: str, url: str, matches: list[dict]) -> None:
         self._emit({"method": method, "url": url, "matches": matches})
+
+    def rule_test_live(self, method: str, url: str, result: dict) -> None:
+        self._emit(result)
 
     def def_list(self, kind: str, rows: list[dict]) -> None:
         self._emit(rows)

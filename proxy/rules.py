@@ -248,6 +248,44 @@ class RuleSet:
             })
         return out
 
+    def dry_run(self, method: str, host: str, path: str) -> list[dict]:
+        """Authoritative rule-evaluation dry-run for `rule test --live`: the
+        ordered matches for (method, host, path), with EXACT per-script phase read
+        from each compiled scheme (`has_on_request`/`has_on_response`) -- which the
+        host-side matcher can't know without Starlark. Mirrors the request-phase
+        first-terminal-wins semantics of the CLI's `match_rules`, but because it
+        knows a script's real hooks it need not be conservative: a response-only
+        script is non-terminal (doesn't gate later rules), a request-active one
+        `may_terminate`. Only block/respond are definitely terminal (stop)."""
+        out: list[dict] = []
+        conditional = False
+        for r in self._rules:
+            if not r.matches(method, host, path):
+                continue
+            item = {"name": r.name, "action": r.action, "visible": r.visible,
+                    "conditional": conditional}
+            if r.action == "script":
+                has_req = bool(getattr(r.scheme, "has_on_request", False))
+                has_resp = bool(getattr(r.scheme, "has_on_response", False))
+                item["script"] = r.script_name
+                item["phase"] = ("both" if has_req and has_resp else
+                                 "request" if has_req else
+                                 "response" if has_resp else None)
+                item["terminal"] = False
+                item["may_terminate"] = has_req
+                out.append(item)
+                if has_req:            # later rules only reached if it doesn't stop
+                    conditional = True
+                continue
+            item["terminal"] = r.action in TERMINAL_ACTIONS
+            item["may_terminate"] = False
+            if r.status is not None:
+                item["status"] = r.status
+            out.append(item)
+            if item["terminal"]:
+                break
+        return out
+
 
 # --------------------------------------------------------------------------
 # Synthetic responses + rule execution contexts.
