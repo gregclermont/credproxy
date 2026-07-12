@@ -43,16 +43,7 @@ def _parse_secret_args(
     return out
 
 
-def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
-    from ..core.model import bindings as core_bindings
-    from ..core.model.bindings import Binding
-    from ..core.model.injectors import find_injector
-    from ..core.providers import find_provider
-
-    # Report EVERY missing required flag at once (like `doctor`), with a
-    # copy-pasteable skeleton -- not one-at-a-time, where each retry reveals the
-    # next gap (issue #74 F). `--secret` is checked at the arg level here (its
-    # slot shape needs the resolved injector, validated below once it's present).
+def _missing_binding_flags(a: argparse.Namespace) -> list[str]:
     missing = []
     if a.injector is None:
         missing.append("--injector")
@@ -62,7 +53,59 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         missing.append("--host")
     if not a.secret:
         missing.append("--secret")
+    return missing
+
+
+def _prompt_secret_flags(prompt_mod, provider: str, slots: tuple[str, ...]) -> list[str]:
+    """Prompt for the secret ref(s) as `--secret`-shaped strings that round-trip
+    through `_parse_secret_args`: a single bare ref for the single-slot `value`
+    sugar, or one `SLOT=REF` per declared slot for a multi-slot injector (#71 --
+    each slot prompted separately via the shared `ask_secret` seam)."""
+    if slots == ("value",):
+        return [prompt_mod.ask_secret(provider, None)]
+    return [f"{s}={prompt_mod.ask_secret(provider, None, slot=s)}" for s in slots]
+
+
+def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
+    from ..core.model import bindings as core_bindings
+    from ..core.model.bindings import Binding
+    from ..core.model.injectors import find_injector
+    from ..core.providers import find_provider
+    from . import prompt as prompt_mod
+
+    # `--secret` is checked at the arg level here (its slot shape needs the
+    # resolved injector, validated below once it's present).
+    missing = _missing_binding_flags(a)
+
+    ws = None
+    injector = None
+    guided = False
+    if missing and prompt_mod.prompting_enabled(ctx):
+        # Guided path (loose + TTY, #75): walk the user through the gaps instead
+        # of erroring, extending the #59 prompt seam. Resolve the workspace FIRST
+        # so a bad NAME fails fast, before the user answers any prompt. Supplied
+        # flags are skipped (partial flags + prompts compose); --name/--env/
+        # --placeholder keep their defaults and are never prompted.
+        ws = _resolve_ws(ctx, name)
+        _require_exists(ws)
+        guided = True
+        if a.injector is None:
+            a.injector = prompt_mod.ask_injector()
+        # Resolve the injector now: its declared slots drive per-slot secret
+        # prompting, and it's needed downstream regardless.
+        injector = find_injector(a.injector)
+        if not a.provider:
+            a.provider = prompt_mod.ask_provider(None)
+        if not a.secret:
+            a.secret = _prompt_secret_flags(prompt_mod, a.provider, injector.spec.slots)
+        if not a.host:
+            a.host = prompt_mod.ask_hosts()
+        missing = _missing_binding_flags(a)
+
     if missing:
+        # Strict / loose-without-a-TTY: report EVERY missing required flag at once
+        # (like `doctor`), with a copy-pasteable skeleton -- not one-at-a-time,
+        # where each retry reveals the next gap (issue #74 F).
         msg = (f"`binding add` missing: {', '.join(missing)}; "
                f"e.g. {render.cmd(render.EX_BINDING_ADD)}")
         if a.injector is None:
@@ -72,10 +115,12 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
                     f"pack: {render.cmd(render.EX_PACK_ADD)})")
         fail(msg)
 
-    ws = _resolve_ws(ctx, name)
-    _require_exists(ws)
+    if ws is None:
+        ws = _resolve_ws(ctx, name)
+        _require_exists(ws)
 
-    injector = find_injector(a.injector)
+    if injector is None:
+        injector = find_injector(a.injector)
     find_provider(a.provider)
 
     # Parse --secret with the injector's declared slots, so a lone
@@ -155,6 +200,46 @@ def do_binding_add(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:
         "placeholder": placeholder,
         "env": env,
     }, attached=core_config.quick_attach(ws))
+
+    if guided:
+        # The teaching moment: echo the equivalent fully-flagged form so the
+        # guided path makes itself unnecessary next time (#75). Any optional
+        # flags the user DID supply (--name/--env/--no-env/--placeholder) ride
+        # along so the echo actually reproduces this binding, not a variant.
+        render.say(f"equivalent to: {render.cmd(_binding_add_tail(binding, a))}")
+
+
+def _binding_add_tail(binding, a: argparse.Namespace) -> str:
+    """The `binding add ...` verb+flags that reproduce `binding` non-interactively
+    (for the guided-path teaching echo). Every value is shell-quoted so a glob
+    host (`*.amazonaws.com`) or a ref with shell metacharacters pastes verbatim
+    without the shell expanding it. `render.cmd` prepends the surface's spelling
+    (`credp ...` on loose, where guided prompting lives)."""
+    import shlex
+
+    def q(v: str) -> str:
+        return shlex.quote(v)
+
+    parts = ["binding add",
+             f"--injector {q(binding.injector)}",
+             f"--provider {q(binding.provider)}"]
+    if isinstance(binding.secret, dict):
+        parts += [f"--secret {q(f'{slot}={ref}')}"
+                  for slot, ref in binding.secret.items()]
+    else:
+        parts.append(f"--secret {q(binding.secret)}")
+    parts += [f"--host {q(h)}" for h in binding.hosts]
+    # Optional flags: echo only the ones the user explicitly supplied (the
+    # guided path never prompts for these -- they kept their flag-or-default).
+    if a.binding_name is not None:
+        parts.append(f"--name {q(a.binding_name)}")
+    if a.no_env:
+        parts.append("--no-env")
+    elif a.env is not None:
+        parts.append(f"--env {q(a.env)}")
+    if a.placeholder is not None:
+        parts.append(f"--placeholder {q(a.placeholder)}")
+    return " ".join(parts)
 
 
 def do_binding_remove(ctx: Ctx, name: str | None, a: argparse.Namespace) -> None:

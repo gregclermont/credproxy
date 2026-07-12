@@ -52,6 +52,15 @@ variable name the workspace will learn the placeholder under.
 > resolved configuration to the proxy. It is never written into the workspace
 > container.
 
+> [!TIP]
+> Don't remember all the flags? On the `credp` surface in a terminal, run
+> `credp binding add` with the missing pieces omitted and it walks you through
+> them — an injector picker (`bearer` preselected), a provider picker, the secret
+> ref (with an offered validate-now fetch), and one or more hosts (each checked as
+> you type). It then echoes the equivalent fully-flagged command so you learn it
+> for next time. The strict `credproxy` surface never prompts — it fails with the
+> list of missing flags instead, so scripts stay predictable.
+
 ## Apply it
 
 The binding is in your config file. Push it to the running proxy:

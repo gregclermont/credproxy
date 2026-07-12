@@ -7,8 +7,10 @@ enabled (`prompting_enabled(ctx)` -- loose AND stdin is a TTY). Every prompt
 writes to STDERR and reads a line from stdin, mirroring the `_confirm_*` /
 `ensure_proxy_image` gates (so a `--json` stdout stream is never corrupted).
 
-Tests monkeypatch `ask_option` / `ask_provider` / `ask_secret` to drive the
-resolution deterministically without a real TTY.
+Tests monkeypatch `ask_option` / `ask_provider` / `ask_secret` / `ask_injector`
+/ `ask_hosts` to drive the resolution deterministically without a real TTY. The
+last two extend the same seam for guided `binding add` (#75) -- one prompting
+mechanism, so pack and binding prompting never drift on look/behavior.
 """
 from __future__ import annotations
 
@@ -126,17 +128,23 @@ def ask_provider(default: str | None):
         print("  a provider is required", file=sys.stderr)
 
 
-def ask_secret(provider: str, default: str | None, slots=()):
+def ask_secret(provider: str, default: str | None, slot: str | None = None):
     """Prompt for a secret ref (free text, provider-appropriate) then OFFER to
     validate it via the ad-hoc `binding test` fetch path -- report the fetched
     length (never the value) and loop on failure, turning a typo'd secret into an
-    immediate fixable moment. Returns the accepted ref."""
+    immediate fixable moment. Returns the accepted ref.
+
+    `slot` names the injector slot this ref fills (multi-slot injectors like
+    sigv4 prompt per declared slot, #71) -- shown in the prompt so the user knows
+    which value is wanted; None (the single-slot `value` sugar) omits it."""
     from ..core.model import bindings as core_bindings
 
+    label = f"secret for provider '{provider}'"
+    if slot is not None:
+        label += f" slot '{slot}'"
     while True:
         d = f" [{default}]" if default else ""
-        ref = _ask(f"secret for provider '{provider}'{d} "
-                   f"(a ref the provider understands): ")
+        ref = _ask(f"{label}{d} (a ref the provider understands): ")
         if not ref and default:
             ref = default
         if not ref:
@@ -158,3 +166,66 @@ def ask_secret(provider: str, default: str | None, slots=()):
             return ref
         print(f"  fetch failed: {r.error or 'unknown error'} — try again",
               file=sys.stderr)
+
+
+# ---- injector / hosts (guided `binding add`, #75) ----------------------------
+
+
+def ask_injector(default: str | None = "bearer"):
+    """Prompt for an injector as an enum-style picker over the registry (name +
+    the scheme it runs), `bearer` -- the overwhelmingly common case -- preselected
+    when it resolves. Mirrors `ask_provider`'s look/behavior. Returns the chosen
+    injector name; loops until a resolvable injector is named (or the default is
+    accepted)."""
+    from ..core.model.injectors import list_injectors
+
+    injectors = list_injectors()
+    names = [d.name for d in injectors]
+    known = set(names)
+    has_default = default in known
+    for i, d in enumerate(injectors, 1):
+        scheme = d.scheme if d.scheme != "script" else f"script:{d.spec.family}"
+        mark = "  (default)" if has_default and d.name == default else ""
+        print(f"  {i}) {d.name} — {scheme}{mark}", file=sys.stderr)
+    while True:
+        dhint = f" [{default}]" if has_default else ""
+        reply = _ask(f"injector{dhint}: ")
+        if not reply and has_default:
+            return default
+        if reply.isdigit() and 1 <= int(reply) <= len(names):
+            return names[int(reply) - 1]
+        if reply in known:
+            return reply
+        if reply:
+            # A free-typed name that doesn't resolve: re-prompt rather than let
+            # `find_injector` error out the whole command (symmetric with
+            # ask_provider's unknown-name loop).
+            print(f"  unknown injector {reply!r} -- pick one of: "
+                  f"{', '.join(names) or '(none registered)'}", file=sys.stderr)
+            continue
+        print("  an injector is required", file=sys.stderr)
+
+
+def ask_hosts():
+    """Prompt for one or more host scopes, free text, repeatable until an empty
+    line. Each is validated through `core/model/hostmatch` immediately, so a bad
+    glob (e.g. the `*.com` rejection) loops with the error instead of failing the
+    whole add. Returns the accepted list (never empty -- the first host is
+    required)."""
+    from ..core.model import hostmatch
+
+    hosts: list[str] = []
+    while True:
+        tail = "empty to finish" if hosts else "e.g. api.example.com or *.example.com"
+        reply = _ask(f"host ({tail}): ")
+        if not reply:
+            if hosts:
+                return hosts
+            print("  at least one host is required", file=sys.stderr)
+            continue
+        if hostmatch.is_pattern(reply):
+            err = hostmatch.validate_pattern(reply)
+            if err:
+                print(f"  {err} — try again", file=sys.stderr)
+                continue
+        hosts.append(reply)

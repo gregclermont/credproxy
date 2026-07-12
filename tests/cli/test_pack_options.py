@@ -507,7 +507,7 @@ def test_provider_secret_prompt_loose_tty(xdg, monkeypatch):
     from credproxy_cli.porcelain import prompt as prompt_mod
     monkeypatch.setattr(prompt_mod, "ask_provider", lambda default: "env")
     monkeypatch.setattr(prompt_mod, "ask_secret",
-                        lambda provider, default, slots=(): "SVC_TOKEN")
+                        lambda provider, default, slot=None: "SVC_TOKEN")
     code, out, err = _run_loose(["workspace", "w", "pack", "add", "svc"],
                                 stdin_text="", stdin_isatty=True)
     assert code == 0, out + err
